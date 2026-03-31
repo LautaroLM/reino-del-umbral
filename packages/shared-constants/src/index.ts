@@ -91,19 +91,18 @@ export interface HouseDefinition {
 }
 
 export const HOUSES: HouseDefinition[] = [
-  // Small house near the camp (example)
   {
     id: 'house_1',
-    x: 5,
-    y: 6,
-    width: 4,
+    x: 1,
+    y: 14,
+    width: 5,
     height: 4,
-    doorX: 6,
-    doorY: 9,
-    interiorMinX: 6,
-    interiorMaxX: 7,
-    interiorMinY: 7,
-    interiorMaxY: 8,
+    doorX: 3,
+    doorY: 17,
+    interiorMinX: 2,
+    interiorMaxX: 4,
+    interiorMinY: 15,
+    interiorMaxY: 16,
   },
 ];
 
@@ -267,6 +266,13 @@ function createMapLayout(): number[][] {
   setRectWalls(layout, 60, 62, 16, 18);
   setRectWalls(layout, 66, 67, 7, 9);
   setRectWalls(layout, 57, 58, 21, 23);
+
+  // House walls — perimeter solid, interior + door walkable
+  for (const house of HOUSES) {
+    setRectWalls(layout, house.x, house.x + house.width - 1, house.y, house.y + house.height - 1);
+    carveRect(layout, house.interiorMinX, house.interiorMaxX, house.interiorMinY, house.interiorMaxY);
+    ensureWalkable(layout, house.doorX, house.doorY);
+  }
 
   // Keep critical gameplay tiles always reachable
   ensureWalkable(layout, SAFE_SPAWN_X, SAFE_SPAWN_Y);

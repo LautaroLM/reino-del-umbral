@@ -357,43 +357,129 @@ export class BootScene extends Phaser.Scene {
     portalGfx.generateTexture('portal_rune', TILE_SIZE, TILE_SIZE);
     portalGfx.destroy();
 
-    // ── House tiles / door ─────────────────────────────────────────────
+    // ── House: brick wall tile ─────────────────────────────────────────
     const houseWallGfx = this.add.graphics();
-    houseWallGfx.fillStyle(0x8b5a3c);
+    // Base stone/brick color
+    houseWallGfx.fillStyle(0xc8956a);
     houseWallGfx.fillRect(0, 0, TILE_SIZE, TILE_SIZE);
-    houseWallGfx.lineStyle(1, 0x6a3f2a);
-    houseWallGfx.strokeRect(1, 1, TILE_SIZE - 2, TILE_SIZE - 2);
+    // Brick rows (offset every other row)
+    const brickH = 8; const brickW = 14;
+    for (let row = 0; row < 4; row++) {
+      const offsetX = (row % 2 === 0) ? 0 : 7;
+      const by = row * brickH;
+      for (let col = -1; col < 4; col++) {
+        const bx = offsetX + col * brickW;
+        houseWallGfx.fillStyle(0xb87c52, 0.55);
+        houseWallGfx.fillRoundedRect(bx + 1, by + 1, brickW - 2, brickH - 2, 1);
+      }
+    }
+    // Mortar lines
+    houseWallGfx.fillStyle(0xe0c8a8, 0.3);
+    for (let row = 0; row <= 4; row++) houseWallGfx.fillRect(0, row * brickH, TILE_SIZE, 1);
     houseWallGfx.generateTexture('house_wall', TILE_SIZE, TILE_SIZE);
     houseWallGfx.destroy();
 
-    const houseRoofGfx = this.add.graphics();
-    houseRoofGfx.fillStyle(0x4a2b6f);
-    houseRoofGfx.fillRect(0, 0, TILE_SIZE * 2, TILE_SIZE * 2);
-    houseRoofGfx.lineStyle(2, 0x6f49a0);
-    houseRoofGfx.strokeRect(0, 0, TILE_SIZE * 2, TILE_SIZE * 2);
-    houseRoofGfx.generateTexture('house_roof', TILE_SIZE * 2, TILE_SIZE * 2);
-    houseRoofGfx.destroy();
+    // ── House: wall with a small window ───────────────────────────────
+    const houseWallWinGfx = this.add.graphics();
+    houseWallWinGfx.fillStyle(0xc8956a);
+    houseWallWinGfx.fillRect(0, 0, TILE_SIZE, TILE_SIZE);
+    for (let row = 0; row < 4; row++) {
+      const offsetX2 = (row % 2 === 0) ? 0 : 7;
+      const by2 = row * brickH;
+      for (let col = -1; col < 4; col++) {
+        const bx2 = offsetX2 + col * brickW;
+        houseWallWinGfx.fillStyle(0xb87c52, 0.55);
+        houseWallWinGfx.fillRoundedRect(bx2 + 1, by2 + 1, brickW - 2, brickH - 2, 1);
+      }
+    }
+    houseWallWinGfx.fillStyle(0xe0c8a8, 0.3);
+    for (let row = 0; row <= 4; row++) houseWallWinGfx.fillRect(0, row * brickH, TILE_SIZE, 1);
+    // Window frame (dark wood)
+    houseWallWinGfx.fillStyle(0x4a2e1a);
+    houseWallWinGfx.fillRect(7, 4, 18, 18);
+    // Glass
+    houseWallWinGfx.fillStyle(0x88ccff, 0.75);
+    houseWallWinGfx.fillRect(8, 5, 16, 16);
+    // Cross pane
+    houseWallWinGfx.fillStyle(0x4a2e1a);
+    houseWallWinGfx.fillRect(15, 5, 2, 16);
+    houseWallWinGfx.fillRect(8, 12, 16, 2);
+    // Reflection
+    houseWallWinGfx.fillStyle(0xffffff, 0.35);
+    houseWallWinGfx.fillRect(9, 6, 5, 5);
+    houseWallWinGfx.generateTexture('house_wall_window', TILE_SIZE, TILE_SIZE);
+    houseWallWinGfx.destroy();
 
+    // ── House: door closed (wooden door with frame & handle) ──────────
     const doorClosedGfx = this.add.graphics();
-    doorClosedGfx.fillStyle(0x3a2b1f);
-    doorClosedGfx.fillRect(8, 8, 16, 20);
-    doorClosedGfx.lineStyle(1, 0x5a3f2a);
-    doorClosedGfx.strokeRect(8, 8, 16, 20);
+    // Background wall beneath door
+    doorClosedGfx.fillStyle(0xc8956a);
+    doorClosedGfx.fillRect(0, 0, TILE_SIZE, TILE_SIZE);
+    // Stone door frame
+    doorClosedGfx.fillStyle(0x888070);
+    doorClosedGfx.fillRect(4, 0, 24, 4);    // lintel
+    doorClosedGfx.fillRect(4, 0, 5, TILE_SIZE);  // left jamb
+    doorClosedGfx.fillRect(23, 0, 5, TILE_SIZE); // right jamb
+    // Door surface (wood)
+    doorClosedGfx.fillStyle(0x7a4e28);
+    doorClosedGfx.fillRect(9, 4, 14, TILE_SIZE - 4);
+    // Wood grain / panels
+    doorClosedGfx.fillStyle(0x5c3818, 0.5);
+    doorClosedGfx.fillRect(10, 5, 5, 9);
+    doorClosedGfx.fillRect(17, 5, 5, 9);
+    doorClosedGfx.fillRect(10, 17, 12, 8);
+    doorClosedGfx.fillStyle(0xa06a38, 0.4);
+    doorClosedGfx.fillRect(10, 5, 12, 1);
+    doorClosedGfx.fillRect(10, 14, 12, 1);
+    doorClosedGfx.fillRect(10, 16, 12, 1);
+    // Door handle (brass knob)
+    doorClosedGfx.fillStyle(0xcf9a1a);
+    doorClosedGfx.fillCircle(21, 17, 2);
     doorClosedGfx.generateTexture('door_closed', TILE_SIZE, TILE_SIZE);
     doorClosedGfx.destroy();
 
+    // ── House: door open (door swung open, dark opening visible) ──────
     const doorOpenGfx = this.add.graphics();
-    doorOpenGfx.fillStyle(0x3a2b1f, 0.6);
-    doorOpenGfx.fillRect(8, 8, 6, 20);
-    doorOpenGfx.fillRect(18, 8, 6, 20);
+    // Background wall
+    doorOpenGfx.fillStyle(0xc8956a);
+    doorOpenGfx.fillRect(0, 0, TILE_SIZE, TILE_SIZE);
+    // Stone frame
+    doorOpenGfx.fillStyle(0x888070);
+    doorOpenGfx.fillRect(4, 0, 24, 4);
+    doorOpenGfx.fillRect(4, 0, 5, TILE_SIZE);
+    doorOpenGfx.fillRect(23, 0, 5, TILE_SIZE);
+    // Dark interior opening
+    doorOpenGfx.fillStyle(0x1a100a);
+    doorOpenGfx.fillRect(9, 4, 14, TILE_SIZE - 4);
+    // Door swung open to left (edge-on view = thin strip)
+    doorOpenGfx.fillStyle(0x7a4e28);
+    doorOpenGfx.fillRect(9, 4, 3, TILE_SIZE - 4);
+    doorOpenGfx.fillStyle(0x5c3818, 0.5);
+    doorOpenGfx.fillRect(9, 4, 3, 9);
+    // Handle (on the thin edge)
+    doorOpenGfx.fillStyle(0xcf9a1a);
+    doorOpenGfx.fillCircle(11, 17, 1);
     doorOpenGfx.generateTexture('door_open', TILE_SIZE, TILE_SIZE);
     doorOpenGfx.destroy();
 
+    // ── House: interior wooden floor ──────────────────────────────────
     const interiorGfx = this.add.graphics();
-    interiorGfx.fillStyle(0xcfb585);
+    // Base warm wood
+    interiorGfx.fillStyle(0xc49a50);
     interiorGfx.fillRect(0, 0, TILE_SIZE, TILE_SIZE);
-    interiorGfx.lineStyle(1, 0xb89a66, 0.6);
-    interiorGfx.strokeRect(0, 0, TILE_SIZE, TILE_SIZE);
+    // Horizontal plank joints
+    interiorGfx.fillStyle(0xa07838, 0.45);
+    interiorGfx.fillRect(0, 0, TILE_SIZE, 1);
+    interiorGfx.fillRect(0, 10, TILE_SIZE, 1);
+    interiorGfx.fillRect(0, 21, TILE_SIZE, 1);
+    interiorGfx.fillRect(0, TILE_SIZE - 1, TILE_SIZE, 1);
+    // Vertical plank end joints (staggered)
+    interiorGfx.fillRect(16, 0, 1, 10);
+    interiorGfx.fillRect(8, 10, 1, 11);
+    interiorGfx.fillRect(24, 21, 1, TILE_SIZE - 21);
+    // Subtle highlight
+    interiorGfx.fillStyle(0xddb855, 0.18);
+    interiorGfx.fillRect(1, 1, TILE_SIZE - 2, 8);
     interiorGfx.generateTexture('interior_floor', TILE_SIZE, TILE_SIZE);
     interiorGfx.destroy();
 

@@ -77,7 +77,7 @@ export class GameRoom extends Room<{ state: GameRoomState }> {
 
       // Block movement through closed house doors
       for (const h of HOUSES) {
-        if (newX === h.doorX && newY === h.doorY) {
+        if (Math.abs(newX - h.doorX) < 0.5 && Math.abs(newY - h.doorY) < 0.5) {
           const open = this.doorStates.get(h.id) || false;
           if (!open) return; // door closed -> block
         }

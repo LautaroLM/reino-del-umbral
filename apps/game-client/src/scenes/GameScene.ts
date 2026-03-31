@@ -108,7 +108,7 @@ export class GameScene extends Phaser.Scene {
   private portalContainers: Phaser.GameObjects.Container[] = [];
   private houseContainers = new Map<string, {
     container: Phaser.GameObjects.Container;
-    roof: Phaser.GameObjects.Image;
+    roof: Phaser.GameObjects.Image | Phaser.GameObjects.Graphics;
     door: Phaser.GameObjects.Image;
     interiorTiles: Phaser.GameObjects.Image[];
     defId: string;
@@ -402,43 +402,78 @@ export class GameScene extends Phaser.Scene {
   }
 
   private addHouses() {
-    // Draw houses defined in shared constants
     for (const h of HOUSES) {
-      const tiles: Phaser.GameObjects.Image[] = [];
       const interiorTiles: Phaser.GameObjects.Image[] = [];
 
-      // Create walls and interior floor
+      // Walls and interior floor tiles
       for (let yy = h.y; yy < h.y + h.height; yy++) {
         for (let xx = h.x; xx < h.x + h.width; xx++) {
           const px = xx * TILE_SIZE + TILE_SIZE / 2;
           const py = yy * TILE_SIZE + TILE_SIZE / 2;
 
-          // interior area
+          // Skip door position – rendered separately below
+          if (xx === h.doorX && yy === h.doorY) continue;
+
           if (xx >= h.interiorMinX && xx <= h.interiorMaxX && yy >= h.interiorMinY && yy <= h.interiorMaxY) {
             const floor = this.add.image(px, py, 'interior_floor');
             floor.setDepth(6);
             interiorTiles.push(floor);
           } else {
-            const wall = this.add.image(px, py, 'house_wall');
+            // windows on the top wall row, second tile from each side
+            const isWindow = yy === h.y && (xx === h.x + 1 || xx === h.x + h.width - 2);
+            const wall = this.add.image(px, py, isWindow ? 'house_wall_window' : 'house_wall');
             wall.setDepth(8);
-            tiles.push(wall);
           }
         }
       }
 
-      // Door
-      const doorX = h.doorX * TILE_SIZE + TILE_SIZE / 2;
-      const doorY = h.doorY * TILE_SIZE + TILE_SIZE / 2;
-      const door = this.add.image(doorX, doorY, 'door_closed');
+      // Door: wall tile behind, door sprite on top
+      const doorPx = h.doorX * TILE_SIZE + TILE_SIZE / 2;
+      const doorPy = h.doorY * TILE_SIZE + TILE_SIZE / 2;
+      const doorBg = this.add.image(doorPx, doorPy, 'house_wall');
+      doorBg.setDepth(8);
+      const door = this.add.image(doorPx, doorPy, 'door_closed');
       door.setDepth(9);
 
-      // Roof - span 2x2 tiles; position roughly top-left
-      const roof = this.add.image((h.x + 1) * TILE_SIZE, (h.y + 1) * TILE_SIZE, 'house_roof');
-      roof.setDepth(50);
+      // ── Gabled roof drawn as a filled triangle ────────────────────
+      const roofGfx = this.add.graphics();
+      const peakX  = (h.x + h.width / 2) * TILE_SIZE;
+      const peakY  = (h.y - 1.5) * TILE_SIZE;
+      const leftX  = (h.x - 0.3) * TILE_SIZE;
+      const rightX = (h.x + h.width + 0.3) * TILE_SIZE;
+      const baseY  = h.y * TILE_SIZE + 4;
+
+      // Main roof fill
+      roofGfx.fillStyle(0x3c3060);
+      roofGfx.fillTriangle(peakX, peakY, leftX, baseY, rightX, baseY);
+      // Horizontal tile stripes
+      const stripes = 5;
+      for (let i = 1; i < stripes; i++) {
+        const t = i / stripes;
+        const sx = leftX + (peakX - leftX) * t;
+        const ex = rightX + (peakX - rightX) * t;
+        const sy = baseY + (peakY - baseY) * t;
+        roofGfx.lineStyle(1, 0x6a5898, 0.5);
+        roofGfx.lineBetween(sx, sy, ex, sy);
+      }
+      // Eave (base edge highlight)
+      roofGfx.lineStyle(2, 0x8070aa, 0.85);
+      roofGfx.lineBetween(leftX, baseY, rightX, baseY);
+      // Ridge lines
+      roofGfx.lineStyle(2, 0x251d45);
+      roofGfx.lineBetween(leftX, baseY, peakX, peakY);
+      roofGfx.lineBetween(peakX, peakY, rightX, baseY);
+      // Chimney (brick, slightly off-center)
+      const chimneyX = (h.x + h.width / 2 + 0.4) * TILE_SIZE;
+      roofGfx.fillStyle(0xa06848);
+      roofGfx.fillRect(chimneyX - 5, peakY - 8, 10, 18);
+      roofGfx.fillStyle(0x6a4028);
+      roofGfx.fillRect(chimneyX - 7, peakY - 10, 14, 4);
+      roofGfx.setDepth(50);
 
       this.houseContainers.set(h.id, {
         container: this.add.container(0, 0, []),
-        roof,
+        roof: roofGfx,
         door,
         interiorTiles,
         defId: h.id,
