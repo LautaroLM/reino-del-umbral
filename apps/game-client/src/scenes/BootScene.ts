@@ -357,16 +357,21 @@ export class BootScene extends Phaser.Scene {
     portalGfx.generateTexture('portal_rune', TILE_SIZE, TILE_SIZE);
     portalGfx.destroy();
 
-    // ── House: brick wall tile ─────────────────────────────────────────
+    // ── House: brick wall tile (front face, 3/4 top-down view) ────────
     const houseWallGfx = this.add.graphics();
     // Base stone/brick color
     houseWallGfx.fillStyle(0xc8956a);
     houseWallGfx.fillRect(0, 0, TILE_SIZE, TILE_SIZE);
-    // Brick rows (offset every other row)
-    const brickH = 8; const brickW = 14;
+    // Top edge cap — wall top surface visible from slight overhead angle
+    houseWallGfx.fillStyle(0x3a1c0c);
+    houseWallGfx.fillRect(0, 0, TILE_SIZE, 5);
+    houseWallGfx.fillStyle(0x5a2e18, 0.6);
+    houseWallGfx.fillRect(0, 5, TILE_SIZE, 2);
+    // Brick rows (offset every other row), start below the cap
+    const brickH = 7; const brickW = 14;
     for (let row = 0; row < 4; row++) {
       const offsetX = (row % 2 === 0) ? 0 : 7;
-      const by = row * brickH;
+      const by = 7 + row * brickH;
       for (let col = -1; col < 4; col++) {
         const bx = offsetX + col * brickW;
         houseWallGfx.fillStyle(0xb87c52, 0.55);
@@ -375,7 +380,7 @@ export class BootScene extends Phaser.Scene {
     }
     // Mortar lines
     houseWallGfx.fillStyle(0xe0c8a8, 0.3);
-    for (let row = 0; row <= 4; row++) houseWallGfx.fillRect(0, row * brickH, TILE_SIZE, 1);
+    for (let row = 0; row <= 4; row++) houseWallGfx.fillRect(0, 7 + row * brickH, TILE_SIZE, 1);
     houseWallGfx.generateTexture('house_wall', TILE_SIZE, TILE_SIZE);
     houseWallGfx.destroy();
 
@@ -383,9 +388,14 @@ export class BootScene extends Phaser.Scene {
     const houseWallWinGfx = this.add.graphics();
     houseWallWinGfx.fillStyle(0xc8956a);
     houseWallWinGfx.fillRect(0, 0, TILE_SIZE, TILE_SIZE);
+    // Same top edge cap
+    houseWallWinGfx.fillStyle(0x3a1c0c);
+    houseWallWinGfx.fillRect(0, 0, TILE_SIZE, 5);
+    houseWallWinGfx.fillStyle(0x5a2e18, 0.6);
+    houseWallWinGfx.fillRect(0, 5, TILE_SIZE, 2);
     for (let row = 0; row < 4; row++) {
       const offsetX2 = (row % 2 === 0) ? 0 : 7;
-      const by2 = row * brickH;
+      const by2 = 7 + row * brickH;
       for (let col = -1; col < 4; col++) {
         const bx2 = offsetX2 + col * brickW;
         houseWallWinGfx.fillStyle(0xb87c52, 0.55);
@@ -393,20 +403,20 @@ export class BootScene extends Phaser.Scene {
       }
     }
     houseWallWinGfx.fillStyle(0xe0c8a8, 0.3);
-    for (let row = 0; row <= 4; row++) houseWallWinGfx.fillRect(0, row * brickH, TILE_SIZE, 1);
-    // Window frame (dark wood)
+    for (let row = 0; row <= 4; row++) houseWallWinGfx.fillRect(0, 7 + row * brickH, TILE_SIZE, 1);
+    // Window frame (dark wood) — centered on the tile below the cap
     houseWallWinGfx.fillStyle(0x4a2e1a);
-    houseWallWinGfx.fillRect(7, 4, 18, 18);
+    houseWallWinGfx.fillRect(6, 7, 20, 18);
     // Glass
     houseWallWinGfx.fillStyle(0x88ccff, 0.75);
-    houseWallWinGfx.fillRect(8, 5, 16, 16);
+    houseWallWinGfx.fillRect(7, 8, 18, 16);
     // Cross pane
     houseWallWinGfx.fillStyle(0x4a2e1a);
-    houseWallWinGfx.fillRect(15, 5, 2, 16);
-    houseWallWinGfx.fillRect(8, 12, 16, 2);
+    houseWallWinGfx.fillRect(15, 8, 2, 16);
+    houseWallWinGfx.fillRect(7, 15, 18, 2);
     // Reflection
     houseWallWinGfx.fillStyle(0xffffff, 0.35);
-    houseWallWinGfx.fillRect(9, 6, 5, 5);
+    houseWallWinGfx.fillRect(8, 9, 6, 5);
     houseWallWinGfx.generateTexture('house_wall_window', TILE_SIZE, TILE_SIZE);
     houseWallWinGfx.destroy();
 

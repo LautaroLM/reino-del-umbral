@@ -405,70 +405,118 @@ export class GameScene extends Phaser.Scene {
     for (const h of HOUSES) {
       const interiorTiles: Phaser.GameObjects.Image[] = [];
 
-      // Walls and interior floor tiles
-      for (let yy = h.y; yy < h.y + h.height; yy++) {
-        for (let xx = h.x; xx < h.x + h.width; xx++) {
-          const px = xx * TILE_SIZE + TILE_SIZE / 2;
-          const py = yy * TILE_SIZE + TILE_SIZE / 2;
-
-          // Skip door position – rendered separately below
-          if (xx === h.doorX && yy === h.doorY) continue;
-
-          if (xx >= h.interiorMinX && xx <= h.interiorMaxX && yy >= h.interiorMinY && yy <= h.interiorMaxY) {
-            const floor = this.add.image(px, py, 'interior_floor');
-            floor.setDepth(6);
-            interiorTiles.push(floor);
-          } else {
-            // windows on the top wall row, second tile from each side
-            const isWindow = yy === h.y && (xx === h.x + 1 || xx === h.x + h.width - 2);
-            const wall = this.add.image(px, py, isWindow ? 'house_wall_window' : 'house_wall');
-            wall.setDepth(8);
-          }
+      // ── Interior floor (visible under translucent roof when inside) ──
+      for (let yy = h.interiorMinY; yy <= h.interiorMaxY; yy++) {
+        for (let xx = h.interiorMinX; xx <= h.interiorMaxX; xx++) {
+          const floor = this.add.image(xx * TILE_SIZE + TILE_SIZE / 2, yy * TILE_SIZE + TILE_SIZE / 2, 'interior_floor');
+          floor.setDepth(6);
+          interiorTiles.push(floor);
         }
       }
 
-      // Door: wall tile behind, door sprite on top
+      // ── Front face: only the BOTTOM row visible (top-down perspective) ──
+      // Back/side walls are hidden under the roof — only the front facade is shown.
+      const frontY = h.y + h.height - 1;
+      for (let xx = h.x; xx < h.x + h.width; xx++) {
+        if (xx === h.doorX && frontY === h.doorY) continue; // door rendered separately
+        const px = xx * TILE_SIZE + TILE_SIZE / 2;
+        const py = frontY * TILE_SIZE + TILE_SIZE / 2;
+        // Windows beside the door on the front face
+        const isWindow = (xx === h.x + 1 || xx === h.x + h.width - 2);
+        this.add.image(px, py, isWindow ? 'house_wall_window' : 'house_wall').setDepth(8);
+      }
+
+      // Door: wall backing + door sprite on top
       const doorPx = h.doorX * TILE_SIZE + TILE_SIZE / 2;
       const doorPy = h.doorY * TILE_SIZE + TILE_SIZE / 2;
-      const doorBg = this.add.image(doorPx, doorPy, 'house_wall');
-      doorBg.setDepth(8);
-      const door = this.add.image(doorPx, doorPy, 'door_closed');
-      door.setDepth(9);
+      this.add.image(doorPx, doorPy, 'house_wall').setDepth(8);
+      const door = this.add.image(doorPx, doorPy, 'door_closed').setDepth(9);
 
-      // ── Gabled roof drawn as a filled triangle ────────────────────
+      // ────────────────────────────────────────────────────────────────────
+      // Roof: flat top-down view of a clay-tile roof with 3/4 perspective cues
+      //   • Covers all rows except the front face row (which stays always seen)
+      //   • Small overhang extends ~0.35 tiles over the front face to cast shadow
+      //   • Shingle gradient: very dark at the back (far from viewer) →
+      //     warm terracotta at the front eave (close to viewer)
+      //   • Staggered vertical joints + ridge cap + side shadows + chimney
+      // ────────────────────────────────────────────────────────────────────
       const roofGfx = this.add.graphics();
-      const peakX  = (h.x + h.width / 2) * TILE_SIZE;
-      const peakY  = (h.y - 1.5) * TILE_SIZE;
-      const leftX  = (h.x - 0.3) * TILE_SIZE;
-      const rightX = (h.x + h.width + 0.3) * TILE_SIZE;
-      const baseY  = h.y * TILE_SIZE + 4;
 
-      // Main roof fill
-      roofGfx.fillStyle(0x3c3060);
-      roofGfx.fillTriangle(peakX, peakY, leftX, baseY, rightX, baseY);
-      // Horizontal tile stripes
-      const stripes = 5;
-      for (let i = 1; i < stripes; i++) {
-        const t = i / stripes;
-        const sx = leftX + (peakX - leftX) * t;
-        const ex = rightX + (peakX - rightX) * t;
-        const sy = baseY + (peakY - baseY) * t;
-        roofGfx.lineStyle(1, 0x6a5898, 0.5);
-        roofGfx.lineBetween(sx, sy, ex, sy);
+      const ovhX   = 0.3;   // side overhang (tiles)
+      const ovhTop = 0.2;   // back-edge overhang (tiles)
+      const ovhBot = 0.35;  // front overhang into front-face row (tiles)
+
+      const rx = (h.x - ovhX) * TILE_SIZE;
+      const ry = (h.y - ovhTop) * TILE_SIZE;
+      const rw = (h.width + ovhX * 2) * TILE_SIZE;
+      // Covers rows h.y..h.y+height-2 (all except front), plus front overhang
+      const rh = (h.height - 1 + ovhBot) * TILE_SIZE;
+
+      // Shingle rows with dark-back → warm-front gradient
+      const shingleH = 7;
+      const numRows  = Math.ceil(rh / shingleH);
+      for (let row = 0; row < numRows; row++) {
+        const t  = row / Math.max(1, numRows - 1);  // 0 = back, 1 = front
+        const cr = Math.min(255, Math.round(0x46 + t * 0x44));
+        const cg = Math.min(255, Math.round(0x12 + t * 0x24));
+        const cb = Math.min(255, Math.round(0x04 + t * 0x10));
+        // Alternate rows slightly lighter for individual tile definition
+        const dr = row % 2 === 0 ? cr : Math.min(255, cr + 16);
+        const dg = row % 2 === 0 ? cg : Math.min(255, cg + 9);
+        const db = row % 2 === 0 ? cb : Math.min(255, cb + 5);
+
+        roofGfx.fillStyle((dr << 16) | (dg << 8) | db);
+        const rowY = ry + row * shingleH;
+        roofGfx.fillRect(rx, rowY, rw, Math.min(shingleH - 1, ry + rh - rowY));
+
+        // Staggered vertical joints between shingles
+        roofGfx.fillStyle(0x240804, 0.55);
+        const jointOfs = (row % 2 === 0) ? 0 : TILE_SIZE * 0.45;
+        for (let jx = rx + jointOfs; jx < rx + rw; jx += TILE_SIZE * 0.9) {
+          roofGfx.fillRect(Math.round(jx), rowY, 1, shingleH - 1);
+        }
       }
-      // Eave (base edge highlight)
-      roofGfx.lineStyle(2, 0x8070aa, 0.85);
-      roofGfx.lineBetween(leftX, baseY, rightX, baseY);
-      // Ridge lines
-      roofGfx.lineStyle(2, 0x251d45);
-      roofGfx.lineBetween(leftX, baseY, peakX, peakY);
-      roofGfx.lineBetween(peakX, peakY, rightX, baseY);
-      // Chimney (brick, slightly off-center)
-      const chimneyX = (h.x + h.width / 2 + 0.4) * TILE_SIZE;
+
+      // Ridge cap at the very back edge (highest visible point of the roof)
+      roofGfx.fillStyle(0xb86838);
+      roofGfx.fillRect(rx + 10, ry, rw - 20, 6);
+      roofGfx.fillStyle(0xd89060, 0.65);
+      roofGfx.fillRect(rx + 13, ry + 1, rw - 26, 3);
+
+      // Light highlight — upper-right ambient light
+      roofGfx.fillStyle(0xffffff, 0.06);
+      roofGfx.fillTriangle(rx + rw * 0.6, ry, rx + rw + 2, ry, rx + rw + 2, ry + rh);
+
+      // Shadow band — left side
+      roofGfx.fillStyle(0x000000, 0.1);
+      roofGfx.fillTriangle(rx - 2, ry, rx + rw * 0.4, ry, rx - 2, ry + rh);
+
+      // Front eave lip (closest edge to viewer — bright terracotta cap)
+      roofGfx.fillStyle(0xaa5230, 0.95);
+      roofGfx.fillRect(rx, ry + rh - 6, rw, 6);
+
+      // Drop shadow cast downward from eave onto tops of front wall tiles
+      roofGfx.fillStyle(0x000000, 0.35);
+      roofGfx.fillRect(rx + 3, ry + rh, rw - 6, 7);
+
+      // Side gable edges (shadow on the left, slight highlight on the right)
+      roofGfx.fillStyle(0x2e0e04, 0.85);
+      roofGfx.fillRect(rx, ry, Math.round(TILE_SIZE * 0.28), rh);
+      roofGfx.fillStyle(0x7a3820, 0.7);
+      roofGfx.fillRect(rx + rw - Math.round(TILE_SIZE * 0.28), ry, Math.round(TILE_SIZE * 0.28), rh);
+
+      // Chimney (brick stack, slightly off-center toward right)
+      const chimneyX = Math.round((h.x + h.width * 0.62) * TILE_SIZE);
+      const chimneyTop = Math.round(ry + rh * 0.08);
       roofGfx.fillStyle(0xa06848);
-      roofGfx.fillRect(chimneyX - 5, peakY - 8, 10, 18);
+      roofGfx.fillRect(chimneyX - 5, chimneyTop, 11, 14);
+      // Chimney cap (slightly wider, darker)
       roofGfx.fillStyle(0x6a4028);
-      roofGfx.fillRect(chimneyX - 7, peakY - 10, 14, 4);
+      roofGfx.fillRect(chimneyX - 7, chimneyTop - 3, 15, 4);
+      // Soot darkening around top opening
+      roofGfx.fillStyle(0x1a0a04, 0.4);
+      roofGfx.fillRect(chimneyX - 5, chimneyTop - 1, 11, 3);
+
       roofGfx.setDepth(50);
 
       this.houseContainers.set(h.id, {
