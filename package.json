@@ -1,0 +1,28 @@
+{
+  "name": "reino-del-umbral",
+  "private": true,
+  "version": "0.0.0",
+  "description": "RPG multijugador 2D web-first",
+  "scripts": {
+    "dev:server": "pnpm --filter @ao/game-server dev",
+    "dev:client": "pnpm --filter @ao/game-client dev",
+    "dev:portal": "pnpm --filter @ao/web-portal dev",
+    "build": "pnpm -r build",
+    "lint": "pnpm -r lint",
+    "typecheck": "pnpm -r typecheck"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^25.5.0",
+    "eslint": "^10.1.0",
+    "prettier": "^3.8.1",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.57.2"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild", "msgpackr-extract", "bcrypt"]
+  }
+}

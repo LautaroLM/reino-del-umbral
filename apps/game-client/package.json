@@ -1,0 +1,23 @@
+{
+  "name": "@ao/game-client",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@ao/shared-constants": "workspace:*",
+    "@ao/shared-protocol": "workspace:*",
+    "@ao/shared-types": "workspace:*",
+    "@colyseus/sdk": "^0.17.35",
+    "phaser": "^3.87.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "vite": "^6.0.0"
+  }
+}
