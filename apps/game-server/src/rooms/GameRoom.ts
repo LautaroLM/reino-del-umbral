@@ -257,7 +257,15 @@ export class GameRoom extends Room<{ state: GameRoomState }> {
     player.questSlimeKills = charData.quest_slime_kills ?? 0;
     player.questSlimeCompleted = charData.quest_slime_completed ?? false;
     player.direction = 'down';
-    player.dead = false;
+    // Restore ghost/dead state from DB so reconnecting as a ghost keeps the penalty
+    if (charData.is_ghost) {
+      player.dead = true;
+      player.ghost = true;
+      player.hp = 0;
+    } else {
+      player.dead = false;
+      player.ghost = false;
+    }
 
     this.state.players.set(client.sessionId, player);
     console.log(`[GameRoom] ${charData.name} joined (session: ${client.sessionId})`);
@@ -520,8 +528,9 @@ export class GameRoom extends Room<{ state: GameRoomState }> {
   // ==================== PERSISTENCE ====================
 
   private async savePlayer(charId: number, player: PlayerState): Promise<void> {
-    // If the player is dead, save HP as 1 so they respawn alive
-    const hpToSave = player.dead ? 1 : Math.max(1, player.hp);
+    // If ghost: persist ghost state so reconnecting keeps the penalty.
+    // HP saved as 0 while dead to signal the ghost state clearly.
+    const hpToSave = player.dead ? 0 : Math.max(1, player.hp);
 
     await CharacterRepository.save(charId, {
       x: player.x,
@@ -534,6 +543,7 @@ export class GameRoom extends Room<{ state: GameRoomState }> {
       equippedWeaponId: player.equippedWeaponId || null,
       questSlimeKills: player.questSlimeKills,
       questSlimeCompleted: player.questSlimeCompleted,
+      ghost: player.ghost,
     });
   }
 

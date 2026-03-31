@@ -11,6 +11,9 @@ async function ensureQuestColumns(): Promise<void> {
       await pool.query(
         'ALTER TABLE characters ADD COLUMN IF NOT EXISTS quest_slime_completed BOOLEAN NOT NULL DEFAULT FALSE',
       );
+      await pool.query(
+        'ALTER TABLE characters ADD COLUMN IF NOT EXISTS is_ghost BOOLEAN NOT NULL DEFAULT FALSE',
+      );
     })();
   }
   return schemaReadyPromise;
@@ -31,6 +34,7 @@ export interface CharacterRow {
   equipped_weapon_id: number | null;
   quest_slime_kills: number;
   quest_slime_completed: boolean;
+  is_ghost: boolean;
 }
 
 export interface CharacterSaveData {
@@ -44,6 +48,7 @@ export interface CharacterSaveData {
   equippedWeaponId: number | null;
   questSlimeKills: number;
   questSlimeCompleted: boolean;
+  ghost: boolean;
 }
 
 export const CharacterRepository = {
@@ -53,9 +58,11 @@ export const CharacterRepository = {
     const result = await pool.query<CharacterRow>(
       `SELECT id, name, race, class, level, experience, hp_current, hp_max, pos_x, pos_y, gold, equipped_weapon_id,
               COALESCE(quest_slime_kills, 0) AS quest_slime_kills,
-              COALESCE(quest_slime_completed, FALSE) AS quest_slime_completed
+              COALESCE(quest_slime_completed, FALSE) AS quest_slime_completed,
+              COALESCE(is_ghost, FALSE) AS is_ghost
        FROM characters
        WHERE id = $1 AND account_id = $2`,
+
       [characterId, accountId],
     );
     return result.rows[0] ?? null;
@@ -68,8 +75,8 @@ export const CharacterRepository = {
       `UPDATE characters
        SET pos_x = $1, pos_y = $2, hp_current = $3, hp_max = $4,
            experience = $5, level = $6, gold = $7, equipped_weapon_id = $8,
-           quest_slime_kills = $9, quest_slime_completed = $10, updated_at = NOW()
-       WHERE id = $11`,
+           quest_slime_kills = $9, quest_slime_completed = $10, is_ghost = $11, updated_at = NOW()
+       WHERE id = $12`,
       [
         Math.round(data.x),
         Math.round(data.y),
@@ -81,6 +88,7 @@ export const CharacterRepository = {
         data.equippedWeaponId ?? null,
         data.questSlimeKills,
         data.questSlimeCompleted,
+        data.ghost,
         characterId,
       ],
     );
