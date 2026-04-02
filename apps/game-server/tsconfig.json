@@ -7,14 +7,7 @@
     "module": "Node16",
     "moduleResolution": "Node16",
     "experimentalDecorators": true,
-    "useDefineForClassFields": false,
-    "paths": {
-      "@ao/shared-constants": ["../../packages/shared-constants/src/index.ts"],
-      "@ao/shared-protocol": ["../../packages/shared-protocol/src/index.ts"],
-      "@ao/shared-types": ["../../packages/shared-types/src/index.ts"],
-      "@ao/shared-utils": ["../../packages/shared-utils/src/index.ts"],
-      "@ao/config": ["../../packages/config/src/index.ts"]
-    }
+    "useDefineForClassFields": false
   },
   "include": ["src"],
   "references": [
