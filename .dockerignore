@@ -1,0 +1,13 @@
+node_modules
+**/node_modules
+dist
+**/dist
+.git
+.gitignore
+.pnpm-store
+coverage
+**/*.log
+**/tsconfig.tsbuildinfo
+.env
+apps/web-portal/.env
+apps/game-client/.env

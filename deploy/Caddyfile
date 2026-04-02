@@ -1,0 +1,14 @@
+{$PORTAL_DOMAIN} {
+  encode zstd gzip
+  reverse_proxy web-portal:80
+}
+
+{$GAME_DOMAIN} {
+  encode zstd gzip
+  reverse_proxy game-client:80
+}
+
+{$API_DOMAIN} {
+  encode zstd gzip
+  reverse_proxy game-server:2567
+}
