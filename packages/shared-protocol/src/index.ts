@@ -11,6 +11,7 @@ export enum ClientMessage {
   UseItem = 'use_item',
   EquipItem = 'equip_item',
   ToggleDoor = 'toggle_door',
+  Ping = 'ping',
 }
 
 /** Messages the server can send to the client */
@@ -33,4 +34,5 @@ export enum ServerMessage {
   NpcDialog = 'npc_dialog',
   QuestState = 'quest_state',
   DoorState = 'door_state',
+  Pong = 'pong',
 }

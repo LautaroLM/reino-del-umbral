@@ -119,6 +119,11 @@ export class GameRoom extends Room<{ state: GameRoomState }> {
       }
     });
 
+    // --- Ping ---
+    this.onMessage(ClientMessage.Ping, (client: Client, data: { t: number }) => {
+      client.send(ServerMessage.Pong, { t: data.t });
+    });
+
     // --- Chat ---
     this.onMessage(ClientMessage.Chat, (client: Client, data: { message: string }) => {
       this.chatService.handleChat(client, data, this.state.players, (payload) => {

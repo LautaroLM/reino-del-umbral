@@ -95,6 +95,8 @@ export class GameScene extends Phaser.Scene {
   private statusText!: Phaser.GameObjects.Text;
   private targetText!: Phaser.GameObjects.Text;
   private questText!: Phaser.GameObjects.Text;
+  private pingText!: Phaser.GameObjects.Text;
+  private pingInterval: ReturnType<typeof setInterval> | null = null;
   private questProgress: QuestStateData = {
     questId: 'slime_hunt_1',
     targetName: 'Slime',
@@ -193,6 +195,10 @@ export class GameScene extends Phaser.Scene {
       fontSize: '12px', color: '#aaaaaa', backgroundColor: '#00000088', padding: { x: 4, y: 2 },
     }).setScrollFactor(0).setDepth(100).setOrigin(1, 0);
 
+    this.pingText = this.add.text(790, 50, 'Ping: --ms', {
+      fontSize: '12px', color: '#aaffaa', backgroundColor: '#00000088', padding: { x: 4, y: 2 },
+    }).setScrollFactor(0).setDepth(100).setOrigin(1, 0);
+
     this.targetText = this.add.text(10, 98, '', {
       fontSize: '13px', color: '#ff8888', backgroundColor: '#00000088', padding: { x: 4, y: 2 },
     }).setScrollFactor(0).setDepth(100);
@@ -210,6 +216,10 @@ export class GameScene extends Phaser.Scene {
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
       this.chatOverlay.dispose();
       this.inventoryOverlay.dispose();
+      if (this.pingInterval !== null) {
+        clearInterval(this.pingInterval);
+        this.pingInterval = null;
+      }
     });
 
     this.connectToServer();
@@ -560,6 +570,13 @@ export class GameScene extends Phaser.Scene {
 
       this.registerRoomMessageHandlers();
 
+      // Start ping loop every 2 seconds
+      this.pingInterval = setInterval(() => {
+        if (this.room) {
+          this.room.send(ClientMessage.Ping, { t: Date.now() });
+        }
+      }, 2000);
+
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'No se pudo conectar';
       console.error('[GameScene] Connection error:', err);
@@ -712,6 +729,13 @@ export class GameScene extends Phaser.Scene {
 
     this.room.onLeave((code) => {
       this.statusText.setText(`Desconectado (código: ${code})`);
+    });
+
+    // --- Pong (ping measurement) ---
+    this.room.onMessage(ServerMessage.Pong, (data: { t: number }) => {
+      const latency = Date.now() - data.t;
+      const color = latency < 80 ? '#aaffaa' : latency < 200 ? '#ffdd88' : '#ff6666';
+      this.pingText.setColor(color).setText(`Ping: ${latency}ms`);
     });
   }
 
