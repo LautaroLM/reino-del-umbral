@@ -6,8 +6,6 @@ services:
     dockerfilePath: ./apps/game-server/Dockerfile
     autoDeploy: true
     healthCheckPath: /api/health
-    buildCommand: corepack enable && pnpm install --frozen-lockfile && pnpm --filter @ao/shared-types build && pnpm --filter @ao/shared-constants build && pnpm --filter @ao/shared-protocol build && pnpm --filter @ao/shared-utils build && pnpm --filter @ao/config build && pnpm --filter @ao/game-server build
-    startCommand: pnpm --filter @ao/game-server start
     envVars:
       - key: NODE_ENV
         value: production
