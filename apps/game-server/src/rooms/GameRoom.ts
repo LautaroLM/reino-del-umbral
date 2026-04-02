@@ -71,6 +71,8 @@ export class GameRoom extends Room<{ state: GameRoomState }> {
       const dx = Math.abs(data.x - player.x);
       const dy = Math.abs(data.y - player.y);
       if (dx > maxDelta || dy > maxDelta) return;
+      // Reject diagonal moves (both axes changed simultaneously)
+      if (dx > 0.001 && dy > 0.001) return;
 
       const newX = Math.max(0, Math.min(MAP_WIDTH - 1, data.x));
       const newY = Math.max(0, Math.min(MAP_HEIGHT - 1, data.y));

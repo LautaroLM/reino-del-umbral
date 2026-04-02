@@ -1112,7 +1112,7 @@ export class GameScene extends Phaser.Scene {
 
     if (this.cursors.left.isDown) { dx = -1; direction = 'left'; }
     else if (this.cursors.right.isDown) { dx = 1; direction = 'right'; }
-    if (this.cursors.up.isDown) { dy = -1; direction = 'up'; }
+    else if (this.cursors.up.isDown) { dy = -1; direction = 'up'; }
     else if (this.cursors.down.isDown) { dy = 1; direction = 'down'; }
 
     if (dx === 0 && dy === 0) return;

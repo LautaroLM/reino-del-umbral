@@ -138,10 +138,11 @@ export class EnemyService {
 
         if (dist > ATTACK_RANGE * 0.8) {
           const moveSpeed = meta.template.speed * dt;
-          const nx = dx / dist;
-          const ny = dy / dist;
-          const tryX = enemy.x + nx * moveSpeed;
-          const tryY = enemy.y + ny * moveSpeed;
+          // Move only along dominant axis (4-directional movement)
+          const stepX = Math.abs(dx) >= Math.abs(dy) ? Math.sign(dx) * moveSpeed : 0;
+          const stepY = Math.abs(dx) >= Math.abs(dy) ? 0 : Math.sign(dy) * moveSpeed;
+          const tryX = enemy.x + stepX;
+          const tryY = enemy.y + stepY;
 
           const clampedX = Math.max(SAFE_ZONE_MAX_X, Math.min(MAP_WIDTH - 1, tryX));
           const clampedY = Math.max(0, Math.min(MAP_HEIGHT - 1, tryY));
@@ -184,8 +185,11 @@ export class EnemyService {
         const dist = Math.hypot(dx, dy);
         if (dist > 0.5) {
           const moveSpeed = meta.template.speed * 0.5 * dt;
-          const tryX = Math.max(SAFE_ZONE_MAX_X, Math.min(MAP_WIDTH - 1, enemy.x + (dx / dist) * moveSpeed));
-          const tryY = Math.max(0, Math.min(MAP_HEIGHT - 1, enemy.y + (dy / dist) * moveSpeed));
+          // Move only along dominant axis (4-directional movement)
+          const stepX = Math.abs(dx) >= Math.abs(dy) ? Math.sign(dx) * moveSpeed : 0;
+          const stepY = Math.abs(dx) >= Math.abs(dy) ? 0 : Math.sign(dy) * moveSpeed;
+          const tryX = Math.max(SAFE_ZONE_MAX_X, Math.min(MAP_WIDTH - 1, enemy.x + stepX));
+          const tryY = Math.max(0, Math.min(MAP_HEIGHT - 1, enemy.y + stepY));
           if (!isSolid(tryX, tryY)) {
             enemy.x = tryX;
             enemy.y = tryY;
@@ -194,6 +198,9 @@ export class EnemyService {
           } else if (!isSolid(enemy.x, tryY)) {
             enemy.y = tryY;
           }
+          enemy.direction = Math.abs(dx) >= Math.abs(dy)
+            ? (dx > 0 ? 'right' : 'left')
+            : (dy > 0 ? 'down' : 'up');
         }
       }
     });
