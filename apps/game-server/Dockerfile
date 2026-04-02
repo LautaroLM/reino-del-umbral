@@ -12,6 +12,11 @@ COPY apps ./apps
 COPY packages ./packages
 
 RUN pnpm install --frozen-lockfile
+RUN pnpm --filter @ao/shared-types build
+RUN pnpm --filter @ao/shared-constants build
+RUN pnpm --filter @ao/shared-protocol build
+RUN pnpm --filter @ao/shared-utils build
+RUN pnpm --filter @ao/config build
 RUN pnpm --filter @ao/game-server build
 
 FROM node:22-alpine AS runner
