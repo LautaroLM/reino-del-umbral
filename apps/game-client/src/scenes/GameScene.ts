@@ -782,7 +782,8 @@ export class GameScene extends Phaser.Scene {
     this.playerSprites.set(sessionId, container);
 
     if (isSelf) {
-      this.cameras.main.startFollow(container, true, 0.15, 0.15);
+      this.cameras.main.startFollow(container, true, 0.1, 0.1);
+      this.cameras.main.centerOn(container.x, container.y);
       this.updateHUD(player);
       this.updateQuestFromPlayerState(player);
       // Sync equipped weapon from initial state
@@ -1142,6 +1143,13 @@ export class GameScene extends Phaser.Scene {
       this.room.send(ClientMessage.Move, { x: newX, y: newY, direction });
       this.lastSentX = newX;
       this.lastSentY = newY;
+
+      // Client-side prediction: move local container immediately so camera doesn't lag
+      const selfContainer = this.playerSprites.get(this.mySessionId);
+      if (selfContainer) {
+        selfContainer.setData('targetX', newX * TILE_SIZE + TILE_SIZE / 2);
+        selfContainer.setData('targetY', newY * TILE_SIZE + TILE_SIZE / 2);
+      }
     }
   }
 

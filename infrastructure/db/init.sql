@@ -5,6 +5,8 @@ CREATE TABLE IF NOT EXISTS accounts (
   id            SERIAL PRIMARY KEY,
   username      VARCHAR(50) UNIQUE NOT NULL,
   password_hash VARCHAR(255) NOT NULL,
+  active_game_session_id VARCHAR(100),
+  active_game_session_at TIMESTAMPTZ,
   created_at    TIMESTAMPTZ DEFAULT NOW(),
   updated_at    TIMESTAMPTZ DEFAULT NOW()
 );

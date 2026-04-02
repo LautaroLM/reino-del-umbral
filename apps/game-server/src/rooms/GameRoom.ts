@@ -19,6 +19,7 @@ import {
 } from '@ao/shared-constants';
 import { isSolid } from '@ao/shared-utils';
 import { verifyToken, type JwtPayload } from '../auth/jwt.js';
+import { AccountRepository } from '../db/AccountRepository.js';
 import { CharacterRepository, type CharacterRow } from '../db/CharacterRepository.js';
 import * as InventoryRepository from '../db/InventoryRepository.js';
 import { QuestService } from './services/QuestService.js';
@@ -40,6 +41,7 @@ const AUTO_SAVE_INTERVAL_MS = 30_000;
 export class GameRoom extends Room<{ state: GameRoomState }> {
   maxClients = 50;
   private playerDbIds = new Map<string, number>(); // sessionId → character.id
+  private playerAccountIds = new Map<string, number>(); // sessionId → account.id
   private lastPlayerAttack = new Map<string, number>(); // sessionId → timestamp
   private enemyMeta = new Map<string, EnemyMeta>(); // enemyId → meta
   private doorStates = new Map<string, boolean>(); // houseId -> open?
@@ -121,6 +123,13 @@ export class GameRoom extends Room<{ state: GameRoomState }> {
 
     // --- Ping ---
     this.onMessage(ClientMessage.Ping, (client: Client, data: { t: number }) => {
+      const accountId = this.playerAccountIds.get(client.sessionId);
+      if (accountId) {
+        void AccountRepository.touchGameSession(accountId, client.sessionId).catch((err) => {
+          console.error(`[GameRoom] Failed to refresh session for account ${accountId}:`, err);
+        });
+      }
+
       client.send(ServerMessage.Pong, { t: data.t });
     });
 
@@ -215,7 +224,7 @@ export class GameRoom extends Room<{ state: GameRoomState }> {
 
   // ==================== AUTH / JOIN / LEAVE ====================
 
-  async onAuth(_client: Client, options: { token?: string; characterId?: number }) {
+  async onAuth(client: Client, options: { token?: string; characterId?: number }) {
     if (!options.token || !options.characterId) {
       throw new Error('Missing token or characterId');
     }
@@ -236,12 +245,18 @@ export class GameRoom extends Room<{ state: GameRoomState }> {
       throw new Error('Character not found');
     }
 
-    return character;
+    const sessionClaimed = await AccountRepository.claimGameSession(payload.accountId, client.sessionId);
+    if (!sessionClaimed) {
+      throw new Error('Esa cuenta ya está conectada en otra sesión. Cerrá la otra conexión para entrar.');
+    }
+
+    return { ...character, accountId: payload.accountId };
   }
 
   async onJoin(client: Client, _options: unknown, auth: CharacterRow) {
     const charData = auth;
     this.playerDbIds.set(client.sessionId, charData.id);
+    this.playerAccountIds.set(client.sessionId, (charData as CharacterRow & { accountId: number }).accountId);
 
     const player = new PlayerState();
     player.name = charData.name;
@@ -296,6 +311,7 @@ export class GameRoom extends Room<{ state: GameRoomState }> {
 
   async onLeave(client: Client) {
     const charId = this.playerDbIds.get(client.sessionId);
+    const accountId = this.playerAccountIds.get(client.sessionId);
     const player = this.state.players.get(client.sessionId);
 
     if (player && charId) {
@@ -304,11 +320,18 @@ export class GameRoom extends Room<{ state: GameRoomState }> {
       );
     }
 
+    if (accountId) {
+      await AccountRepository.releaseGameSession(accountId, client.sessionId).catch((err) =>
+        console.error(`[GameRoom] Release session error for account ${accountId}:`, err),
+      );
+    }
+
     // Clear enemy aggro targeting this player
     this.enemyService.clearAggroForSession(this.enemyMeta, client.sessionId);
 
     this.state.players.delete(client.sessionId);
     this.playerDbIds.delete(client.sessionId);
+    this.playerAccountIds.delete(client.sessionId);
     this.lastPlayerAttack.delete(client.sessionId);
 
     // Announce departure
@@ -325,6 +348,17 @@ export class GameRoom extends Room<{ state: GameRoomState }> {
 
     // Save all still-connected players on room close
     await this.saveAllPlayers();
+
+    const sessionReleases: Promise<void>[] = [];
+    this.playerAccountIds.forEach((accountId, sessionId) => {
+      sessionReleases.push(
+        AccountRepository.releaseGameSession(accountId, sessionId).catch((err) =>
+          console.error(`[GameRoom] Release session error for account ${accountId}:`, err),
+        ),
+      );
+    });
+
+    await Promise.all(sessionReleases);
   }
 
   // ==================== INVENTORY ====================
