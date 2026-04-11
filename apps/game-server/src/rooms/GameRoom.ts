@@ -1,23 +1,13 @@
 import { Room, Client } from '@colyseus/core';
-import { GameRoomState, PlayerState } from './GameRoomState.js';
+import { GameRoomState, PlayerState, NpcState, EnemyState } from './GameRoomState.js';
 import { ClientMessage, ServerMessage } from '@ao/shared-protocol';
 import {
-  PLAYER_SPEED, MAP_WIDTH, MAP_HEIGHT, TICK_RATE,
+  PLAYER_SPEED, TICK_RATE,
   ENEMY_SPAWN_INTERVAL_MS,
   SAFE_SPAWN_X, SAFE_SPAWN_Y,
   ITEM_DEFINITIONS,
-  QUEST_NPC,
-  MERCHANT_NPC,
-  PRIEST_NPC,
-  HOUSES,
-  NPC_INTERACT_RANGE,
-  SAFE_PORTAL,
-  DUNGEON_PORTAL,
-  PORTAL_INTERACT_RANGE,
-  MERCHANT_HEALTH_POTION_ITEM_ID,
-  MERCHANT_HEALTH_POTION_PRICE,
 } from '@ao/shared-constants';
-import { isSolid } from '@ao/shared-utils';
+import { getWorldData, type WorldDataService } from '../world/WorldDataService.js';
 import { verifyToken, type JwtPayload } from '../auth/jwt.js';
 import { AccountRepository } from '../db/AccountRepository.js';
 import { CharacterRepository, type CharacterRow } from '../db/CharacterRepository.js';
@@ -25,6 +15,7 @@ import * as InventoryRepository from '../db/InventoryRepository.js';
 import { QuestService } from './services/QuestService.js';
 import { ChatService } from './services/ChatService.js';
 import { EnemyService, type EnemyMeta, type EnemyRuntimeContext } from './services/EnemyService.js';
+import { AO_MAP_SIZE, NpcType } from '@ao/shared-world';
 
 interface MoveData {
   x: number;
@@ -40,11 +31,11 @@ const AUTO_SAVE_INTERVAL_MS = 30_000;
 
 export class GameRoom extends Room<{ state: GameRoomState }> {
   maxClients = 50;
+  private worldData!: WorldDataService;
   private playerDbIds = new Map<string, number>(); // sessionId → character.id
   private playerAccountIds = new Map<string, number>(); // sessionId → account.id
   private lastPlayerAttack = new Map<string, number>(); // sessionId → timestamp
   private enemyMeta = new Map<string, EnemyMeta>(); // enemyId → meta
-  private doorStates = new Map<string, boolean>(); // houseId -> open?
   private questService = new QuestService();
   private chatService = new ChatService();
   private enemyService = new EnemyService();
@@ -55,11 +46,10 @@ export class GameRoom extends Room<{ state: GameRoomState }> {
 
   onCreate() {
     this.state = new GameRoomState();
-
-    // Initialize door states (closed by default)
-    for (const h of HOUSES) {
-      this.doorStates.set(h.id, false);
-    }
+    this.worldData = getWorldData();
+    // Preload the starting map(s) into memory and spawn NPCs from AO data
+    this.worldData.preloadMaps([1]);
+    this.spawnWorldNpcs(1);
 
     // --- Movement ---
     this.onMessage(ClientMessage.Move, (client: Client, data: MoveData) => {
@@ -67,25 +57,21 @@ export class GameRoom extends Room<{ state: GameRoomState }> {
       // Allow movement for ghosts (dead but ghost=true), but block if truly dead without ghost flag
       if (!player || (player.dead && !player.ghost)) return;
 
-      const maxDelta = PLAYER_SPEED / TICK_RATE * 3;
+      // Allow at least one full tile per input packet for tile-by-tile movement.
+      const maxDelta = Math.max(1.001, PLAYER_SPEED / TICK_RATE * 3);
       const dx = Math.abs(data.x - player.x);
       const dy = Math.abs(data.y - player.y);
       if (dx > maxDelta || dy > maxDelta) return;
       // Reject diagonal moves (both axes changed simultaneously)
       if (dx > 0.001 && dy > 0.001) return;
 
-      const newX = Math.max(0, Math.min(MAP_WIDTH - 1, data.x));
-      const newY = Math.max(0, Math.min(MAP_HEIGHT - 1, data.y));
+      const mapSize = AO_MAP_SIZE;
+      const mapHeight = AO_MAP_SIZE;
+      const newX = Math.max(0, Math.min(mapSize - 1, data.x));
+      const newY = Math.max(0, Math.min(mapHeight - 1, data.y));
 
-      if (isSolid(newX, newY)) return;
-
-      // Block movement through closed house doors
-      for (const h of HOUSES) {
-        if (Math.abs(newX - h.doorX) < 0.5 && Math.abs(newY - h.doorY) < 0.5) {
-          const open = this.doorStates.get(h.id) || false;
-          if (!open) return; // door closed -> block
-        }
-      }
+      const solid = this.worldData.isSolid(player.currentMapId, newX, newY);
+      if (solid) return;
 
       // Block movement into an enemy tile (approx 0.6 tile radius)
       const ENTITY_RADIUS = 0.6;
@@ -104,23 +90,18 @@ export class GameRoom extends Room<{ state: GameRoomState }> {
       }
     });
 
-    // --- Door toggle ---
-    this.onMessage(ClientMessage.ToggleDoor, (client: Client) => {
-      const player = this.state.players.get(client.sessionId);
-      if (!player) return;
-
-      // Find nearby house door
-      for (const h of HOUSES) {
-        const dist = Math.hypot(player.x - h.doorX, player.y - h.doorY);
-        if (dist <= NPC_INTERACT_RANGE) {
-          const currentlyOpen = this.doorStates.get(h.id) || false;
-          const newOpen = !currentlyOpen;
-          this.doorStates.set(h.id, newOpen);
-          // Broadcast new state to all clients
-          this.broadcast(ServerMessage.DoorState, { id: h.id, open: newOpen });
-          return;
-        }
-      }
+    // --- Request map data ---
+    this.onMessage(ClientMessage.RequestMapData, (client: Client, data: { mapId: number }) => {
+      if (typeof data?.mapId !== 'number') return;
+      const map = this.worldData.getMap(data.mapId);
+      if (!map) return;
+      client.send(ServerMessage.MapData, {
+        mapId: map.mapId,
+        width: map.width,
+        height: map.height,
+        metadata: map.metadata,
+        tiles: map.tiles,
+      });
     });
 
     // --- Ping ---
@@ -147,43 +128,7 @@ export class GameRoom extends Room<{ state: GameRoomState }> {
       this.chatService.handleWhisper(client, data, this.state.players, this.clients);
     });
 
-    // --- NPC interaction ---
-    this.onMessage(ClientMessage.NpcInteract, async (client: Client, data: { npcId: string }) => {
-      const player = this.state.players.get(client.sessionId);
-      if (!player) return;
-
-      // Priest interaction allowed even when dead/ghost
-      if (data?.npcId === PRIEST_NPC.id) {
-        await this.handlePriestInteract(client, player);
-        return;
-      }
-
-      // Other NPCs cannot be interacted with while dead/ghost
-      if (player.dead) {
-        client.send(ServerMessage.NpcDialog, {
-          npcName: 'Sistema',
-          message: 'No puedes interactuar ahora.',
-        });
-        return;
-      }
-
-      if (data?.npcId === QUEST_NPC.id) {
-        this.questService.handleNpcInteract(client, player, data.npcId);
-        return;
-      }
-
-      if (data?.npcId === MERCHANT_NPC.id) {
-        await this.handleMerchantInteract(client, player);
-        return;
-      }
-
-      client.send(ServerMessage.NpcDialog, {
-        npcName: 'Sistema',
-        message: 'Ese NPC no existe.',
-      });
-    });
-
-    // --- Portal interaction ---
+    // --- Portal / NPC interaction ---
     this.onMessage(ClientMessage.PortalUse, (client: Client) => {
       const player = this.state.players.get(client.sessionId);
       if (!player || player.dead) return;
@@ -205,20 +150,11 @@ export class GameRoom extends Room<{ state: GameRoomState }> {
       this.handleEquipItem(client, data);
     });
 
-    // --- Enemy spawn timer ---
-    this.spawnTimer = setInterval(
-      () => this.enemyService.spawnEnemies(this.getEnemyRuntimeContext()),
-      ENEMY_SPAWN_INTERVAL_MS,
-    );
-
     // --- Enemy AI tick ---
     this.tickTimer = setInterval(
       () => this.enemyService.tickEnemyAI(this.getEnemyRuntimeContext()),
       1000 / TICK_RATE,
     );
-
-    // Spawn initial enemies
-    this.enemyService.spawnEnemies(this.getEnemyRuntimeContext());
 
     // --- Auto-save all players periodically ---
     this.autoSaveTimer = setInterval(() => this.saveAllPlayers(), AUTO_SAVE_INTERVAL_MS);
@@ -270,14 +206,39 @@ export class GameRoom extends Room<{ state: GameRoomState }> {
     player.hp = charData.hp_current;
     player.hpMax = charData.hp_max;
     // Use saved position unless it's inside a solid tile (e.g. legacy (0,0) default)
-    const spawnX = !isSolid(charData.pos_x, charData.pos_y) ? charData.pos_x : SAFE_SPAWN_X;
-    const spawnY = !isSolid(charData.pos_x, charData.pos_y) ? charData.pos_y : SAFE_SPAWN_Y;
+    // Default to AO map 1 (Ciudad de Ullathorpe) for spawning
+    const startMapId = charData.current_map_id ?? 1;
+    player.currentMapId = this.worldData.hasMap(startMapId) ? startMapId : 1;
+
+    let spawnX = charData.pos_x;
+    let spawnY = charData.pos_y;
+    if (player.currentMapId > 0) {
+      // Validate position against AO world data
+      if (this.worldData.isSolid(player.currentMapId, spawnX, spawnY)) {
+        const fallback = this.findNearestWalkableAoTile(player.currentMapId, spawnX, spawnY);
+        if (fallback) {
+          spawnX = fallback.x;
+          spawnY = fallback.y;
+        } else {
+          // Last resort: keep legacy fallback values.
+          spawnX = SAFE_SPAWN_X;
+          spawnY = SAFE_SPAWN_Y;
+        }
+      }
+      if (spawnX < 0 || spawnY < 0 || spawnX >= AO_MAP_SIZE || spawnY >= AO_MAP_SIZE) {
+        spawnX = SAFE_SPAWN_X;
+        spawnY = SAFE_SPAWN_Y;
+      }
+    }
     player.x = spawnX;
     player.y = spawnY;
     player.gold = charData.gold || 0;
     player.equippedWeaponId = charData.equipped_weapon_id ?? 0;
     player.questSlimeKills = charData.quest_slime_kills ?? 0;
     player.questSlimeCompleted = charData.quest_slime_completed ?? false;
+    player.idBody = charData.id_body ?? 56;
+    player.idHead = charData.id_head ?? 1;
+    player.idHelmet = charData.id_helmet ?? 4;
     player.direction = 'down';
     // Restore ghost/dead state from DB so reconnecting as a ghost keeps the penalty
     if (charData.is_ghost) {
@@ -301,11 +262,6 @@ export class GameRoom extends Room<{ state: GameRoomState }> {
       client.send(ServerMessage.InventoryLoad, { items: inventory });
     } catch (err) {
       console.error(`[GameRoom] Inventory load error for character ${charData.id}:`, err);
-    }
-
-    // Send current door states so client can render doors correctly
-    for (const [id, open] of this.doorStates.entries()) {
-      client.send(ServerMessage.DoorState, { id, open });
     }
 
     this.questService.sendQuestState(client, player);
@@ -381,6 +337,7 @@ export class GameRoom extends Room<{ state: GameRoomState }> {
       broadcast: (type, payload) => {
         this.broadcast(type, payload);
       },
+      isSolid: (x, y) => this.worldData.isSolid(1, x, y),
     };
   }
 
@@ -451,119 +408,137 @@ export class GameRoom extends Room<{ state: GameRoomState }> {
     });
   }
 
-  private async handleMerchantInteract(client: Client, player: PlayerState): Promise<void> {
-    const distance = Math.hypot(player.x - MERCHANT_NPC.x, player.y - MERCHANT_NPC.y);
-    if (distance > NPC_INTERACT_RANGE) {
-      client.send(ServerMessage.NpcDialog, {
-        npcName: MERCHANT_NPC.name,
-        message: 'Acercate para comerciar conmigo.',
-      });
-      return;
-    }
-
-    const charId = this.playerDbIds.get(client.sessionId);
-    if (!charId) return;
-
-    if (player.gold < MERCHANT_HEALTH_POTION_PRICE) {
-      client.send(ServerMessage.NpcDialog, {
-        npcName: MERCHANT_NPC.name,
-        message: `No te alcanza. La pocion cuesta ${MERCHANT_HEALTH_POTION_PRICE} oro.`,
-      });
-      return;
-    }
-
-    const addedItem = await InventoryRepository.addItem(charId, MERCHANT_HEALTH_POTION_ITEM_ID, 1);
-    if (!addedItem) {
-      client.send(ServerMessage.NpcDialog, {
-        npcName: MERCHANT_NPC.name,
-        message: 'Tu inventario esta lleno.',
-      });
-      return;
-    }
-
-    player.gold -= MERCHANT_HEALTH_POTION_PRICE;
-    client.send(ServerMessage.ItemReceived, addedItem);
-    client.send(ServerMessage.NpcDialog, {
-      npcName: MERCHANT_NPC.name,
-      message: `Hecho. ${addedItem.name} por ${MERCHANT_HEALTH_POTION_PRICE} oro.`,
-    });
-  }
-
-  private async handlePriestInteract(client: Client, player: PlayerState): Promise<void> {
-    const distance = Math.hypot(player.x - PRIEST_NPC.x, player.y - PRIEST_NPC.y);
-    if (distance > NPC_INTERACT_RANGE) {
-      client.send(ServerMessage.NpcDialog, {
-        npcName: PRIEST_NPC.name,
-        message: 'Acercate para hablar conmigo.',
-      });
-      return;
-    }
-
-    if (!player.dead || !player.ghost) {
-      client.send(ServerMessage.NpcDialog, {
-        npcName: PRIEST_NPC.name,
-        message: 'No necesitas mi ayuda ahora.',
-      });
-      return;
-    }
-
-    // Revive the player at the priest's location
-    player.dead = false;
-    player.ghost = false;
-    player.hp = player.hpMax;
-    player.x = PRIEST_NPC.x;
-    player.y = PRIEST_NPC.y;
-
-    const charId = this.playerDbIds.get(client.sessionId);
-    if (charId) {
-      try {
-        await this.savePlayer(charId, player);
-      } catch (err) {
-        console.error(`[GameRoom] Save error on revive for character ${charId}:`, err);
+  private handlePortalUse(client: Client, player: PlayerState): void {
+    // 1. Check for a portal tile exit
+    const exit = this.worldData.getTileExit(player.currentMapId, player.x, player.y);
+    if (exit && this.worldData.hasMap(exit.map)) {
+      const destX = exit.x - 1; // 1-indexed → 0-indexed
+      const destY = exit.y - 1;
+      if (!this.worldData.isSolid(exit.map, destX, destY)) {
+        player.currentMapId = exit.map;
+        player.x = destX;
+        player.y = destY;
+        // Preload destination map
+        this.worldData.preloadMaps([exit.map]);
+        // Notify client about map transition
+        const destMap = this.worldData.getMap(exit.map);
+        client.send(ServerMessage.MapTransition, {
+          mapId: exit.map,
+          x: destX,
+          y: destY,
+          mapName: destMap?.metadata.name ?? `Mapa ${exit.map}`,
+        });
+        return;
       }
     }
 
-    this.broadcast(ServerMessage.PlayerRespawned, {
-      sessionId: client.sessionId,
-      name: player.name,
+    // 2. Check for a nearby NPC to interact with
+    const INTERACT_RADIUS = 1.5;
+    let nearestNpc: NpcState | null = null;
+    let nearestDist = Infinity;
+    this.state.npcs.forEach((npc) => {
+      const dist = Math.hypot(player.x - npc.x, player.y - npc.y);
+      if (dist <= INTERACT_RADIUS && dist < nearestDist) {
+        nearestDist = dist;
+        nearestNpc = npc;
+      }
     });
 
+    if (nearestNpc) {
+      const npc = nearestNpc as NpcState;
+      client.send(ServerMessage.NpcDialog, {
+        npcName: npc.name,
+        message: this.getNpcGreeting(npc.npcType),
+      });
+      return;
+    }
+
     client.send(ServerMessage.NpcDialog, {
-      npcName: PRIEST_NPC.name,
-      message: 'Has sido revivido. ¡Vuelve a la batalla!',
+      npcName: 'Sistema',
+      message: 'No hay nada con qué interactuar cerca.',
     });
   }
 
-  private handlePortalUse(client: Client, player: PlayerState): void {
-    const nearSafePortal = Math.hypot(player.x - SAFE_PORTAL.x, player.y - SAFE_PORTAL.y) <= PORTAL_INTERACT_RANGE;
-    const nearDungeonPortal = Math.hypot(player.x - DUNGEON_PORTAL.x, player.y - DUNGEON_PORTAL.y) <= PORTAL_INTERACT_RANGE;
+  private getNpcGreeting(npcType: number): string {
+    switch (npcType) {
+      case NpcType.Priest:   return '¡Que los dioses te protejan, aventurero!';
+      case NpcType.Banker:   return 'Bienvenido al banco. ¿En qué puedo ayudarte?';
+      case NpcType.Merchant: return '¡Echa un vistazo a mi mercancía!';
+      case NpcType.Fisher:   return 'Las aguas están tranquilas hoy...';
+      case NpcType.Crafter:  return 'Puedo fabricar lo que necesites.';
+      case NpcType.Noble:    return 'Salve, viajero. Bienvenido a estas tierras.';
+      default:               return '...';
+    }
+  }
 
-    if (nearSafePortal) {
-      if (isSolid(DUNGEON_PORTAL.x, DUNGEON_PORTAL.y)) return;
-      player.x = DUNGEON_PORTAL.x;
-      player.y = DUNGEON_PORTAL.y;
-      client.send(ServerMessage.NpcDialog, {
-        npcName: 'Portal',
-        message: 'Atravesaste el portal al Santuario Sombrio.',
-      });
-      return;
+  // ==================== WORLD NPC SPAWN ====================
+
+  /** Spawns all NPCs for a given map from the imported AO world data.
+   *  - Hostile mobs (npcType=0) → EnemyState (participate in combat AI)
+   *  - Passive NPCs (all other types) → NpcState (static, interactable with E)
+   */
+  private spawnWorldNpcs(mapId: number): void {
+    const placements = this.worldData.getNpcPlacementsForMap(mapId);
+    let hostile = 0;
+    let passive = 0;
+
+    for (const placement of placements) {
+      const template = this.worldData.npcTemplates[placement.npcIndex];
+      if (!template) continue;
+
+      const x = placement.x - 1; // AO data is 1-indexed → 0-indexed
+      const y = placement.y - 1;
+      const id = `wnpc_${mapId}_${placement.npcIndex}_${x}_${y}`;
+
+      if (template.npcType === NpcType.HostileMob) {
+        // Spawn as a combat enemy using real placement stats
+        const e = new EnemyState();
+        e.id = id;
+        e.enemyType = 'mob';
+        e.name = template.name;
+        e.hp = template.maxHp || 30;
+        e.hpMax = template.maxHp || 30;
+        e.x = x;
+        e.y = y;
+        e.direction = 'down';
+        e.idBody = template.idBody ?? 0;
+        e.idHead = template.idHead ?? 0;
+        this.state.enemies.set(id, e);
+        this.enemyMeta.set(id, {
+          template: {
+            type: 'mob',
+            name: template.name,
+            hp: template.maxHp || 30,
+            damage: template.maxHit || 5,
+            speed: 1.0,
+            aggroRange: 5,
+            xpReward: template.exp || 10,
+            goldReward: [1, 3],
+          },
+          targetSessionId: null,
+          lastAttackTime: 0,
+          lastMoveTime: 0,
+          spawnX: x,
+          spawnY: y,
+        });
+        hostile++;
+      } else {
+        // Spawn as passive NPC
+        const npc = new NpcState();
+        npc.id = id;
+        npc.name = template.name;
+        npc.x = x;
+        npc.y = y;
+        npc.idBody = template.idBody;
+        npc.idHead = template.idHead;
+        npc.npcType = template.npcType;
+        npc.npcIndex = template.npcIndex;
+        this.state.npcs.set(id, npc);
+        passive++;
+      }
     }
 
-    if (nearDungeonPortal) {
-      if (isSolid(SAFE_PORTAL.x, SAFE_PORTAL.y)) return;
-      player.x = SAFE_PORTAL.x;
-      player.y = SAFE_PORTAL.y;
-      client.send(ServerMessage.NpcDialog, {
-        npcName: 'Portal',
-        message: 'Regresaste al campamento.',
-      });
-      return;
-    }
-
-    client.send(ServerMessage.NpcDialog, {
-      npcName: 'Portal',
-      message: 'No hay un portal activo cerca.',
-    });
+    console.log(`[WorldNPC] Map ${mapId}: spawned ${hostile} hostile mobs + ${passive} passive NPCs from AO data`);
   }
 
   // ==================== PERSISTENCE ====================
@@ -585,7 +560,46 @@ export class GameRoom extends Room<{ state: GameRoomState }> {
       questSlimeKills: player.questSlimeKills,
       questSlimeCompleted: player.questSlimeCompleted,
       ghost: player.ghost,
+      currentMapId: player.currentMapId,
     });
+  }
+
+  private findNearestWalkableAoTile(
+    mapId: number,
+    preferredX: number,
+    preferredY: number,
+  ): { x: number; y: number } | null {
+    const map = this.worldData.getMap(mapId);
+    if (!map) return null;
+
+    const startX = Math.max(0, Math.min(map.width - 1, Math.round(preferredX)));
+    const startY = Math.max(0, Math.min(map.height - 1, Math.round(preferredY)));
+
+    if (!map.tiles[startY]?.[startX]?.blocked) {
+      return { x: startX, y: startY };
+    }
+
+    const maxRadius = Math.max(map.width, map.height);
+    for (let radius = 1; radius <= maxRadius; radius++) {
+      const minX = Math.max(0, startX - radius);
+      const maxX = Math.min(map.width - 1, startX + radius);
+      const minY = Math.max(0, startY - radius);
+      const maxY = Math.min(map.height - 1, startY + radius);
+
+      for (let y = minY; y <= maxY; y++) {
+        for (let x = minX; x <= maxX; x++) {
+          const onPerimeter =
+            x === minX || x === maxX || y === minY || y === maxY;
+          if (!onPerimeter) continue;
+
+          if (!map.tiles[y]?.[x]?.blocked) {
+            return { x, y };
+          }
+        }
+      }
+    }
+
+    return null;
   }
 
   private async saveAllPlayers(): Promise<void> {

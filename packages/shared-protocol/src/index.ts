@@ -6,12 +6,11 @@ export enum ClientMessage {
   Attack = 'attack',
   Chat = 'chat',
   Whisper = 'whisper',
-  NpcInteract = 'npc_interact',
   PortalUse = 'portal_use',
   UseItem = 'use_item',
   EquipItem = 'equip_item',
-  ToggleDoor = 'toggle_door',
   Ping = 'ping',
+  RequestMapData = 'request_map_data',
 }
 
 /** Messages the server can send to the client */
@@ -33,6 +32,7 @@ export enum ServerMessage {
   PlayerLeft = 'player_left',
   NpcDialog = 'npc_dialog',
   QuestState = 'quest_state',
-  DoorState = 'door_state',
   Pong = 'pong',
+  MapData = 'map_data',
+  MapTransition = 'map_transition',
 }

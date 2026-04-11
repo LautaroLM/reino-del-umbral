@@ -9,17 +9,15 @@ import {
   BASE_PLAYER_DAMAGE,
   ENEMY_TEMPLATES,
   MAX_ENEMIES,
-  MAP_WIDTH,
-  MAP_HEIGHT,
   SAFE_ZONE_MAX_X,
   SAFE_SPAWN_X,
   SAFE_SPAWN_Y,
-  TICK_RATE,
   ITEM_DEFINITIONS,
   ENEMY_LOOT_TABLES,
   type EnemyTemplate,
 } from '@ao/shared-constants';
-import { isSolid } from '@ao/shared-utils';
+import { AO_MAP_SIZE } from '@ao/shared-world';
+
 import { EnemyState, type GameRoomState, type PlayerState } from '../GameRoomState.js';
 import * as InventoryRepository from '../../db/InventoryRepository.js';
 import type { QuestService } from './QuestService.js';
@@ -32,6 +30,7 @@ export interface EnemyMeta {
   template: EnemyTemplate;
   targetSessionId: string | null;
   lastAttackTime: number;
+  lastMoveTime: number;
   spawnX: number;
   spawnY: number;
 }
@@ -44,6 +43,7 @@ export interface EnemyRuntimeContext {
   questService: QuestService;
   nextEnemyId: () => string;
   broadcast: (type: ServerMessage, payload: unknown) => void;
+  isSolid: (x: number, y: number) => boolean;
 }
 
 export class EnemyService {
@@ -88,7 +88,7 @@ export class EnemyService {
   }
 
   tickEnemyAI(context: EnemyRuntimeContext): void {
-    const dt = 1 / TICK_RATE;
+    const now = Date.now();
 
     context.state.enemies.forEach((enemy, enemyId) => {
       const meta = context.enemyMeta.get(enemyId);
@@ -131,34 +131,31 @@ export class EnemyService {
         }
       }
 
+      const moveIntervalMs = 1000 / meta.template.speed;
+
       if (target) {
         const dx = target.x - enemy.x;
         const dy = target.y - enemy.y;
         const dist = Math.hypot(dx, dy);
 
         if (dist > ATTACK_RANGE * 0.8) {
-          const moveSpeed = meta.template.speed * dt;
-          // Move only along dominant axis (4-directional movement)
-          const stepX = Math.abs(dx) >= Math.abs(dy) ? Math.sign(dx) * moveSpeed : 0;
-          const stepY = Math.abs(dx) >= Math.abs(dy) ? 0 : Math.sign(dy) * moveSpeed;
-          const tryX = enemy.x + stepX;
-          const tryY = enemy.y + stepY;
-
-          const clampedX = Math.max(SAFE_ZONE_MAX_X, Math.min(MAP_WIDTH - 1, tryX));
-          const clampedY = Math.max(0, Math.min(MAP_HEIGHT - 1, tryY));
-
-          if (!isSolid(clampedX, clampedY)) {
-            enemy.x = clampedX;
-            enemy.y = clampedY;
-          } else if (!isSolid(clampedX, enemy.y)) {
-            enemy.x = clampedX;
-          } else if (!isSolid(enemy.x, clampedY)) {
-            enemy.y = clampedY;
-          }
-
+          // Update facing direction every tick
           enemy.direction = Math.abs(dx) > Math.abs(dy)
             ? (dx > 0 ? 'right' : 'left')
             : (dy > 0 ? 'down' : 'up');
+
+          // Move exactly 1 tile when the move interval has elapsed
+          if (now - meta.lastMoveTime >= moveIntervalMs) {
+            meta.lastMoveTime = now;
+            const stepX = Math.abs(dx) >= Math.abs(dy) ? Math.sign(dx) : 0;
+            const stepY = Math.abs(dx) >= Math.abs(dy) ? 0 : Math.sign(dy);
+            const newX = Math.max(SAFE_ZONE_MAX_X, Math.min(AO_MAP_SIZE - 1, enemy.x + stepX));
+            const newY = Math.max(0, Math.min(AO_MAP_SIZE - 1, enemy.y + stepY));
+            if (!context.isSolid(newX, newY)) {
+              enemy.x = newX;
+              enemy.y = newY;
+            }
+          }
         } else {
           const now = Date.now();
           if (now - meta.lastAttackTime >= ATTACK_COOLDOWN_MS) {
@@ -180,23 +177,19 @@ export class EnemyService {
           }
         }
       } else {
+        // No target: return to spawn at half speed
         const dx = meta.spawnX - enemy.x;
         const dy = meta.spawnY - enemy.y;
         const dist = Math.hypot(dx, dy);
-        if (dist > 0.5) {
-          const moveSpeed = meta.template.speed * 0.5 * dt;
-          // Move only along dominant axis (4-directional movement)
-          const stepX = Math.abs(dx) >= Math.abs(dy) ? Math.sign(dx) * moveSpeed : 0;
-          const stepY = Math.abs(dx) >= Math.abs(dy) ? 0 : Math.sign(dy) * moveSpeed;
-          const tryX = Math.max(SAFE_ZONE_MAX_X, Math.min(MAP_WIDTH - 1, enemy.x + stepX));
-          const tryY = Math.max(0, Math.min(MAP_HEIGHT - 1, enemy.y + stepY));
-          if (!isSolid(tryX, tryY)) {
-            enemy.x = tryX;
-            enemy.y = tryY;
-          } else if (!isSolid(tryX, enemy.y)) {
-            enemy.x = tryX;
-          } else if (!isSolid(enemy.x, tryY)) {
-            enemy.y = tryY;
+        if (dist >= 1 && now - meta.lastMoveTime >= moveIntervalMs * 2) {
+          meta.lastMoveTime = now;
+          const stepX = Math.abs(dx) >= Math.abs(dy) ? Math.sign(dx) : 0;
+          const stepY = Math.abs(dx) >= Math.abs(dy) ? 0 : Math.sign(dy);
+          const newX = Math.max(SAFE_ZONE_MAX_X, Math.min(AO_MAP_SIZE - 1, enemy.x + stepX));
+          const newY = Math.max(0, Math.min(AO_MAP_SIZE - 1, enemy.y + stepY));
+          if (!context.isSolid(newX, newY)) {
+            enemy.x = newX;
+            enemy.y = newY;
           }
           enemy.direction = Math.abs(dx) >= Math.abs(dy)
             ? (dx > 0 ? 'right' : 'left')
@@ -217,15 +210,15 @@ export class EnemyService {
       const template = templates[Math.floor(Math.random() * templates.length)];
       const id = context.nextEnemyId();
 
-      let x = 15 + Math.random() * (MAP_WIDTH - 17);
-      let y = 2 + Math.random() * (MAP_HEIGHT - 4);
+      let x = 15 + Math.floor(Math.random() * (AO_MAP_SIZE - 17));
+      let y = 2 + Math.floor(Math.random() * (AO_MAP_SIZE - 4));
       let attempts = 0;
-      while (isSolid(x, y) && attempts < 20) {
-        x = 15 + Math.random() * (MAP_WIDTH - 17);
-        y = 2 + Math.random() * (MAP_HEIGHT - 4);
+      while (context.isSolid(x, y) && attempts < 20) {
+        x = 15 + Math.floor(Math.random() * (AO_MAP_SIZE - 17));
+        y = 2 + Math.floor(Math.random() * (AO_MAP_SIZE - 4));
         attempts++;
       }
-      if (isSolid(x, y)) continue;
+      if (context.isSolid(x, y)) continue;
 
       const enemy = new EnemyState();
       enemy.id = id;
@@ -242,6 +235,7 @@ export class EnemyService {
         template,
         targetSessionId: null,
         lastAttackTime: 0,
+        lastMoveTime: 0,
         spawnX: x,
         spawnY: y,
       });

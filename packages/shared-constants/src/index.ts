@@ -4,9 +4,57 @@ export const TICK_RATE = 20; // server ticks per second
 export const TILE_SIZE = 32;
 export const MAP_WIDTH = 72; // tiles
 export const MAP_HEIGHT = 28; // tiles
-export const PLAYER_SPEED = 8; // tiles per second
+export const PLAYER_SPEED = 4.5; // tiles per second
 export const MAX_PLAYERS_PER_ROOM = 50;
 export const MAX_CHAT_LENGTH = 200;
+
+export interface CharacterAppearance {
+  idBody: number;
+  idHead: number;
+  idHelmet: number;
+}
+
+export interface CharacterAppearancePreset extends CharacterAppearance {
+  id: string;
+  label: string;
+  characterClass: 'warrior' | 'mage' | 'explorer';
+}
+
+// Basado en presets reales encontrados en argentumonlineweb-cliente/config/pvpChars.json.
+export const CHARACTER_APPEARANCE_PRESETS: readonly CharacterAppearancePreset[] = [
+  { id: 'mage-arcane', label: 'Mago arcano', characterClass: 'mage', idBody: 56, idHead: 1, idHelmet: 4 },
+  { id: 'warrior-steel', label: 'Guerrero de acero', characterClass: 'warrior', idBody: 107, idHead: 1, idHelmet: 6 },
+  { id: 'explorer-hunter', label: 'Explorador cazador', characterClass: 'explorer', idBody: 58, idHead: 1, idHelmet: 6 },
+  { id: 'explorer-rogue', label: 'Explorador sigiloso', characterClass: 'explorer', idBody: 48, idHead: 1, idHelmet: 6 },
+  { id: 'mage-bard', label: 'Mago bardo', characterClass: 'mage', idBody: 56, idHead: 1, idHelmet: 1 },
+] as const;
+
+export const DEFAULT_APPEARANCE_PRESET_BY_CLASS: Record<'warrior' | 'mage' | 'explorer', string> = {
+  warrior: 'warrior-steel',
+  mage: 'mage-arcane',
+  explorer: 'explorer-hunter',
+};
+
+export function resolveCharacterAppearance(
+  presetId?: string,
+  characterClass?: 'warrior' | 'mage' | 'explorer',
+): CharacterAppearance {
+  const preset = (presetId
+    ? CHARACTER_APPEARANCE_PRESETS.find((candidate) => candidate.id === presetId)
+    : undefined)
+    ?? (characterClass
+      ? CHARACTER_APPEARANCE_PRESETS.find(
+        (candidate) => candidate.id === DEFAULT_APPEARANCE_PRESET_BY_CLASS[characterClass],
+      )
+      : undefined)
+    ?? CHARACTER_APPEARANCE_PRESETS[0];
+
+  return {
+    idBody: preset.idBody,
+    idHead: preset.idHead,
+    idHelmet: preset.idHelmet,
+  };
+}
 
 // --- Combat ---
 export const ATTACK_RANGE = 1.5; // tiles
@@ -46,73 +94,9 @@ export const SAFE_ZONE_MAX_X = 15;
 // --- First quest (NPC tutorial) ---
 export const QUEST_SLIME_REQUIRED_KILLS = 5;
 export const QUEST_SLIME_REWARD_GOLD = 75;
-export const NPC_INTERACT_RANGE = 1.8;
-
-export interface NpcDefinition {
-  id: string;
-  name: string;
-  x: number;
-  y: number;
-}
-
-export const QUEST_NPC: NpcDefinition = {
-  id: 'npc_tutor',
-  name: 'Instructor Bram',
-  x: 7,
-  y: 10,
-};
-
-export const MERCHANT_NPC: NpcDefinition = {
-  id: 'npc_merchant',
-  name: 'Mercader Orin',
-  x: 9,
-  y: 10,
-};
-
-export const PRIEST_NPC: NpcDefinition = {
-  id: 'npc_priest',
-  name: 'Sacerdote Lys',
-  x: 6,
-  y: 10,
-};
-
-export interface HouseDefinition {
-  id: string;
-  x: number; // top-left tile x
-  y: number; // top-left tile y
-  width: number; // tiles
-  height: number; // tiles
-  doorX: number; // door tile x
-  doorY: number; // door tile y
-  interiorMinX: number;
-  interiorMaxX: number;
-  interiorMinY: number;
-  interiorMaxY: number;
-}
-
-export const HOUSES: HouseDefinition[] = [
-  {
-    id: 'house_1',
-    x: 1,
-    y: 14,
-    width: 5,
-    height: 4,
-    doorX: 3,
-    doorY: 17,
-    interiorMinX: 2,
-    interiorMaxX: 4,
-    interiorMinY: 15,
-    interiorMaxY: 16,
-  },
-];
 
 export const MERCHANT_HEALTH_POTION_ITEM_ID = 1;
 export const MERCHANT_HEALTH_POTION_PRICE = 20;
-
-export interface TilePosition {
-  x: number;
-  y: number;
-}
 
 export interface RectZone {
   minX: number;
@@ -137,10 +121,6 @@ export const DESERT_BIOME_ZONE: RectZone = {
   minY: 2,
   maxY: MAP_HEIGHT - 3,
 };
-
-export const SAFE_PORTAL: TilePosition = { x: 12, y: 10 };
-export const DUNGEON_PORTAL: TilePosition = { x: 26, y: 4 };
-export const PORTAL_INTERACT_RANGE = 1.3;
 
 // ---------------------------------------------------------------------------
 // Items — matches rows seeded in item_templates table
@@ -267,20 +247,8 @@ function createMapLayout(): number[][] {
   setRectWalls(layout, 66, 67, 7, 9);
   setRectWalls(layout, 57, 58, 21, 23);
 
-  // House walls — perimeter solid, interior + door walkable
-  for (const house of HOUSES) {
-    setRectWalls(layout, house.x, house.x + house.width - 1, house.y, house.y + house.height - 1);
-    carveRect(layout, house.interiorMinX, house.interiorMaxX, house.interiorMinY, house.interiorMaxY);
-    ensureWalkable(layout, house.doorX, house.doorY);
-  }
-
   // Keep critical gameplay tiles always reachable
   ensureWalkable(layout, SAFE_SPAWN_X, SAFE_SPAWN_Y);
-  ensureWalkable(layout, QUEST_NPC.x, QUEST_NPC.y);
-  ensureWalkable(layout, MERCHANT_NPC.x, MERCHANT_NPC.y);
-  ensureWalkable(layout, PRIEST_NPC.x, PRIEST_NPC.y);
-  ensureWalkable(layout, SAFE_PORTAL.x, SAFE_PORTAL.y);
-  ensureWalkable(layout, DUNGEON_PORTAL.x, DUNGEON_PORTAL.y);
 
   return layout;
 }

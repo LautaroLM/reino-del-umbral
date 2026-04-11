@@ -7,6 +7,13 @@ export class BootScene extends Phaser.Scene {
   }
 
   preload() {
+    // AO graphic catalogue used to resolve grhIndex -> source image crop.
+    this.load.json('ao_graficos_catalog', '/assets/ao/init/graficos.json');
+    // AO character init data (bodies, heads, helmets)
+    this.load.json('ao_bodies',  '/assets/ao/init/bodies.json');
+    this.load.json('ao_heads',   '/assets/ao/init/heads.json');
+    this.load.json('ao_cascos',  '/assets/ao/init/cascos.json');
+
     // Generate a compact runtime tileset used by the world tilemap.
     // Tile order: 0 safe grass, 1 combat grass, 2 wall, 3 dungeon floor, 4 desert.
     const worldTilesGfx = this.add.graphics();

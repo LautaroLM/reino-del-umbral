@@ -1,5 +1,6 @@
 import { Router, type Request, type Response, type IRouter } from 'express';
 import { pool } from '../db/pool.js';
+import { ensureCharacterColumns } from '../db/CharacterRepository.js';
 import { verifyToken } from '../auth/jwt.js';
 import {
   CreateCharacterRequest,
@@ -8,7 +9,13 @@ import {
   Race,
   CharacterClass,
 } from '@ao/shared-types';
-import { SAFE_SPAWN_X, SAFE_SPAWN_Y } from '@ao/shared-constants';
+import {
+  SAFE_SPAWN_X,
+  SAFE_SPAWN_Y,
+  CHARACTER_APPEARANCE_PRESETS,
+  DEFAULT_APPEARANCE_PRESET_BY_CLASS,
+  resolveCharacterAppearance,
+} from '@ao/shared-constants';
 
 const VALID_RACES: Race[] = ['human', 'elf', 'dwarf', 'nomad'];
 const VALID_CLASSES: CharacterClass[] = ['warrior', 'mage', 'explorer'];
@@ -40,13 +47,27 @@ function requireAuth(req: Request, res: Response, next: () => void) {
 
 characterRouter.use(requireAuth);
 
+function isValidAppearanceSelection(idBody?: number, idHead?: number, idHelmet?: number): boolean {
+  if (idBody == null || idHead == null || idHelmet == null) return true;
+  return CHARACTER_APPEARANCE_PRESETS.some(
+    (preset) => preset.idBody === idBody && preset.idHead === idHead && preset.idHelmet === idHelmet,
+  );
+}
+
 /** GET /characters — list characters for the authenticated account */
 characterRouter.get('/', async (req: Request, res: Response<CharacterSummary[] | ApiError>) => {
   const accountId = (req as AuthenticatedRequest).accountId;
 
   try {
+    await ensureCharacterColumns();
     const result = await pool.query(
-      'SELECT id, name, race, class AS "characterClass", level FROM characters WHERE account_id = $1 ORDER BY created_at',
+      `SELECT id, name, race, class AS "characterClass", level,
+              COALESCE(id_body, 56) AS "idBody",
+              COALESCE(id_head, 1) AS "idHead",
+              COALESCE(id_helmet, 4) AS "idHelmet"
+       FROM characters
+       WHERE account_id = $1
+       ORDER BY created_at`,
       [accountId],
     );
     res.json(result.rows);
@@ -59,7 +80,7 @@ characterRouter.get('/', async (req: Request, res: Response<CharacterSummary[] |
 /** POST /characters — create a new character */
 characterRouter.post('/', async (req: Request, res: Response<CharacterSummary | ApiError>) => {
   const accountId = (req as AuthenticatedRequest).accountId;
-  const { name, race, characterClass } = req.body as CreateCharacterRequest;
+  const { name, race, characterClass, idBody, idHead, idHelmet } = req.body as CreateCharacterRequest;
 
   if (!name || !NAME_REGEX.test(name)) {
     res.status(400).json({ error: 'Name must be 3-30 alphanumeric characters, underscores or spaces.' });
@@ -73,8 +94,13 @@ characterRouter.post('/', async (req: Request, res: Response<CharacterSummary | 
     res.status(400).json({ error: `Invalid class. Valid: ${VALID_CLASSES.join(', ')}` });
     return;
   }
+  if (!isValidAppearanceSelection(idBody, idHead, idHelmet)) {
+    res.status(400).json({ error: 'Invalid character appearance.' });
+    return;
+  }
 
   try {
+    await ensureCharacterColumns();
     // Check character limit
     const countResult = await pool.query('SELECT COUNT(*) FROM characters WHERE account_id = $1', [accountId]);
     if (Number(countResult.rows[0].count) >= MAX_CHARACTERS_PER_ACCOUNT) {
@@ -89,11 +115,27 @@ characterRouter.post('/', async (req: Request, res: Response<CharacterSummary | 
       return;
     }
 
+    const defaultPresetId = DEFAULT_APPEARANCE_PRESET_BY_CLASS[characterClass];
+    const appearance = (idBody != null && idHead != null && idHelmet != null)
+      ? { idBody, idHead, idHelmet }
+      : resolveCharacterAppearance(defaultPresetId, characterClass);
+
     const result = await pool.query(
-      `INSERT INTO characters (account_id, name, race, class, pos_x, pos_y)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       RETURNING id, name, race, class AS "characterClass", level`,
-      [accountId, name, race, characterClass, SAFE_SPAWN_X, SAFE_SPAWN_Y],
+      `INSERT INTO characters (account_id, name, race, class, pos_x, pos_y, id_body, id_head, id_helmet)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       RETURNING id, name, race, class AS "characterClass", level,
+                 id_body AS "idBody", id_head AS "idHead", id_helmet AS "idHelmet"`,
+      [
+        accountId,
+        name,
+        race,
+        characterClass,
+        SAFE_SPAWN_X,
+        SAFE_SPAWN_Y,
+        appearance.idBody,
+        appearance.idHead,
+        appearance.idHelmet,
+      ],
     );
 
     res.status(201).json(result.rows[0]);

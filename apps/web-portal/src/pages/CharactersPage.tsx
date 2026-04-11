@@ -2,6 +2,10 @@ import { useState, useEffect, type FormEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import type { CharacterSummary, Race, CharacterClass } from '@ao/shared-types';
 import {
+  CHARACTER_APPEARANCE_PRESETS,
+  DEFAULT_APPEARANCE_PRESET_BY_CLASS,
+} from '@ao/shared-constants';
+import {
   listCharacters,
   createCharacter,
   deleteCharacter,
@@ -31,6 +35,7 @@ export function CharactersPage() {
   const [name, setName] = useState('');
   const [race, setRace] = useState<Race>('human');
   const [charClass, setCharClass] = useState<CharacterClass>('warrior');
+  const [appearancePresetId, setAppearancePresetId] = useState<string>(DEFAULT_APPEARANCE_PRESET_BY_CLASS.warrior);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
 
@@ -43,6 +48,10 @@ export function CharactersPage() {
     }
     loadCharacters();
   }, []);
+
+  useEffect(() => {
+    setAppearancePresetId(DEFAULT_APPEARANCE_PRESET_BY_CLASS[charClass]);
+  }, [charClass]);
 
   async function loadCharacters() {
     try {
@@ -59,8 +68,20 @@ export function CharactersPage() {
     e.preventDefault();
     setError('');
     try {
-      await createCharacter({ name, race, characterClass: charClass });
+      const preset = CHARACTER_APPEARANCE_PRESETS.find((candidate) => candidate.id === appearancePresetId)
+        ?? CHARACTER_APPEARANCE_PRESETS[0];
+      await createCharacter({
+        name,
+        race,
+        characterClass: charClass,
+        idBody: preset.idBody,
+        idHead: preset.idHead,
+        idHelmet: preset.idHelmet,
+      });
       setName('');
+      setRace('human');
+      setCharClass('warrior');
+      setAppearancePresetId(DEFAULT_APPEARANCE_PRESET_BY_CLASS.warrior);
       setShowCreate(false);
       await loadCharacters();
     } catch (err: any) {
@@ -112,6 +133,11 @@ export function CharactersPage() {
                     {RACES.find((r) => r.value === char.race)?.label} —{' '}
                     {CLASSES.find((c) => c.value === char.characterClass)?.label} — Nivel {char.level}
                   </p>
+                  <p style={styles.metaMuted}>
+                    {CHARACTER_APPEARANCE_PRESETS.find(
+                      (preset) => preset.idBody === char.idBody && preset.idHead === char.idHead && preset.idHelmet === char.idHelmet,
+                    )?.label ?? 'Apariencia personalizada'}
+                  </p>
                 </div>
                 <div style={styles.cardActions}>
                   <button onClick={() => handleSelect(char)} style={styles.playBtn}>Jugar</button>
@@ -148,6 +174,15 @@ export function CharactersPage() {
                   <option key={c.value} value={c.value}>{c.label}</option>
                 ))}
               </select>
+              <select
+                value={appearancePresetId}
+                onChange={(e) => setAppearancePresetId(e.target.value)}
+                style={styles.input}
+              >
+                {CHARACTER_APPEARANCE_PRESETS.filter((preset) => preset.characterClass === charClass).map((preset) => (
+                  <option key={preset.id} value={preset.id}>{preset.label}</option>
+                ))}
+              </select>
               <div style={{ display: 'flex', gap: '0.5rem' }}>
                 <button type="submit" style={styles.playBtn}>Crear</button>
                 <button type="button" onClick={() => setShowCreate(false)} style={styles.smallBtn}>Cancelar</button>
@@ -173,6 +208,7 @@ const styles: Record<string, React.CSSProperties> = {
     background: '#16213e', padding: '1rem', borderRadius: '8px',
   },
   meta: { margin: '0.25rem 0 0', fontSize: '0.85rem', color: '#aaa' },
+  metaMuted: { margin: '0.2rem 0 0', fontSize: '0.78rem', color: '#7ea1b5' },
   cardActions: { display: 'flex', gap: '0.5rem', alignItems: 'center' },
   playBtn: {
     padding: '0.5rem 1rem', borderRadius: '4px', border: 'none',

@@ -9,7 +9,8 @@
     "dev:portal": "pnpm --filter @ao/web-portal dev",
     "build": "pnpm -r build",
     "lint": "pnpm -r lint",
-    "typecheck": "pnpm -r typecheck"
+    "typecheck": "pnpm -r typecheck",
+    "import:world": "pnpm tsx scripts/import-world.ts"
   },
   "engines": {
     "node": ">=22"
@@ -19,10 +20,15 @@
     "@types/node": "^25.5.0",
     "eslint": "^10.1.0",
     "prettier": "^3.8.1",
+    "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.57.2"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["esbuild", "msgpackr-extract", "bcrypt"]
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "msgpackr-extract",
+      "bcrypt"
+    ]
   }
 }

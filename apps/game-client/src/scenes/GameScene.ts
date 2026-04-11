@@ -3,29 +3,17 @@ import { Client, Room, Callbacks } from '@colyseus/sdk';
 import { ClientMessage, ServerMessage } from '@ao/shared-protocol';
 import {
   TILE_SIZE,
-  MAP_WIDTH,
-  MAP_HEIGHT,
   PLAYER_SPEED,
   ATTACK_RANGE,
-  MAP_LAYOUT,
   ITEM_DEFINITIONS,
-  SAFE_ZONE_MAX_X,
-  QUEST_NPC,
-  MERCHANT_NPC,
-  PRIEST_NPC,
-  HOUSES,
-  NPC_INTERACT_RANGE,
-  SAFE_PORTAL,
-  DUNGEON_PORTAL,
-  PORTAL_INTERACT_RANGE,
-  DUNGEON_FLOOR_ZONE,
-  DESERT_BIOME_ZONE,
   QUEST_SLIME_REQUIRED_KILLS,
 } from '@ao/shared-constants';
-import { isSolid } from '@ao/shared-utils';
+import type { MapDefinition } from '@ao/shared-world';
+import { AO_MAP_SIZE } from '@ao/shared-world';
 import type { InventoryItem } from '@ao/shared-types';
 import { ChatOverlay } from './ui/ChatOverlay';
 import { InventoryOverlay } from './ui/InventoryOverlay';
+import { AoMapRenderer, MAP_DEPTH } from './AoMapRenderer';
 
 const GAME_SERVER_URL = import.meta.env.VITE_WS_URL as string;
 
@@ -38,6 +26,7 @@ interface PlayerData {
   level: number;
   direction: string;
   characterClass: string;
+  currentMapId: number;
   xp: number;
   gold: number;
   dead: boolean;
@@ -45,6 +34,10 @@ interface PlayerData {
   equippedWeaponId: number;
   questSlimeKills: number;
   questSlimeCompleted: boolean;
+  /** AO appearance graphic indices */
+  idBody:   number;
+  idHead:   number;
+  idHelmet: number;
 }
 
 interface EnemyData {
@@ -56,6 +49,20 @@ interface EnemyData {
   hp: number;
   hpMax: number;
   direction: string;
+  /** AO graphic indices provided by server when spawned from world NPC templates */
+  idBody?: number;
+  idHead?: number;
+}
+
+interface NpcData {
+  id: string;
+  name: string;
+  x: number;
+  y: number;
+  idBody: number;
+  idHead: number;
+  npcType: number;
+  npcIndex: number;
 }
 
 interface QuestStateData {
@@ -68,24 +75,31 @@ interface QuestStateData {
 }
 
 export class GameScene extends Phaser.Scene {
-  private static readonly TILE_SAFE_GRASS = 0;
-  private static readonly TILE_COMBAT_GRASS = 1;
-  private static readonly TILE_WALL = 2;
-  private static readonly TILE_DUNGEON_FLOOR = 3;
-  private static readonly TILE_DESERT_FLOOR = 4;
-
+  // Red
   private client!: Client;
   private room!: Room;
-  private playerSprites = new Map<string, Phaser.GameObjects.Container>();
-  private enemySprites = new Map<string, Phaser.GameObjects.Container>();
+  private mySessionId = '';
+
+  // Input
   private cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
   private spaceKey!: Phaser.Input.Keyboard.Key;
   private interactKey!: Phaser.Input.Keyboard.Key;
-  private mySessionId = '';
   private lastSentX = -1;
   private lastSentY = -1;
+  private nextMoveAt = 0;
+  private predictedTileX = Number.NaN;
+  private predictedTileY = Number.NaN;
+
+  // Sprites de entidades
+  private playerSprites = new Map<string, Phaser.GameObjects.Container>();
+  private enemySprites  = new Map<string, Phaser.GameObjects.Container>();
+  private npcSprites    = new Map<string, Phaser.GameObjects.Container>();
   private selectedEnemyId: string | null = null;
   private lastAttackTime = 0;
+
+  // Mapa AO — todo delegado a AoMapRenderer
+  private mapRenderer!: AoMapRenderer;
+  private currentMapId = 0;
 
   // HUD
   private hpText!: Phaser.GameObjects.Text;
@@ -96,6 +110,8 @@ export class GameScene extends Phaser.Scene {
   private targetText!: Phaser.GameObjects.Text;
   private questText!: Phaser.GameObjects.Text;
   private pingText!: Phaser.GameObjects.Text;
+  private equippedWeaponText!: Phaser.GameObjects.Text;
+  private coordsText!: Phaser.GameObjects.Text;
   private pingInterval: ReturnType<typeof setInterval> | null = null;
   private questProgress: QuestStateData = {
     questId: 'slime_hunt_1',
@@ -105,115 +121,48 @@ export class GameScene extends Phaser.Scene {
     completed: false,
     rewardGold: 0,
   };
-  private npcContainer: Phaser.GameObjects.Container | null = null;
-  private merchantNpcContainer: Phaser.GameObjects.Container | null = null;
-  private portalContainers: Phaser.GameObjects.Container[] = [];
-  private houseContainers = new Map<string, {
-    container: Phaser.GameObjects.Container;
-    roof: Phaser.GameObjects.Image | Phaser.GameObjects.Graphics;
-    door: Phaser.GameObjects.Image;
-    interiorTiles: Phaser.GameObjects.Image[];
-    defId: string;
-  }>();
 
-  // Inventory
+  // UI
   private inventory: InventoryItem[] = [];
   private inventoryOverlay!: InventoryOverlay;
-  private equippedWeaponId: number = 0;
-  private equippedWeaponText!: Phaser.GameObjects.Text;
+  private equippedWeaponId = 0;
 
   constructor() {
     super({ key: 'GameScene' });
   }
 
   create() {
-    this.createMapLayers();
+    this.mapRenderer = new AoMapRenderer(this);
+    this.cameras.main.setBounds(0, 0, AO_MAP_SIZE * TILE_SIZE, AO_MAP_SIZE * TILE_SIZE);
+    this.cameras.main.roundPixels = true;
 
-    this.addQuestNpc();
-    this.addMerchantNpc();
-    this.addPriestNpc();
-    this.addHouses();
-    this.addPortals();
-
-    // Camera
-    this.cameras.main.setBounds(0, 0, MAP_WIDTH * TILE_SIZE, MAP_HEIGHT * TILE_SIZE);
-
-    // Keyboard
-    this.cursors = this.input.keyboard!.createCursorKeys();
-    this.spaceKey = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE);
+    this.cursors     = this.input.keyboard!.createCursorKeys();
+    this.spaceKey    = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE);
     this.interactKey = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.E);
+
     this.chatOverlay = new ChatOverlay(this.input.keyboard!);
     this.chatOverlay.mount((payload) => {
       if (!this.room) return;
       if (payload.type === 'whisper') {
-        this.room.send(ClientMessage.Whisper, {
-          targetName: payload.targetName,
-          message: payload.message,
-        });
+        this.room.send(ClientMessage.Whisper, { targetName: payload.targetName, message: payload.message });
       } else {
         this.room.send(ClientMessage.Chat, { message: payload.message });
       }
     });
 
     this.inventoryOverlay = new InventoryOverlay({
-      onUseItem: (slotIndex) => {
-        if (!this.room) return;
-        this.room.send(ClientMessage.UseItem, { slotIndex });
-      },
-      onEquipItem: (slotIndex) => {
-        if (!this.room) return;
-        this.room.send(ClientMessage.EquipItem, { slotIndex });
-      },
+      onUseItem:   (i) => this.room?.send(ClientMessage.UseItem,   { slotIndex: i }),
+      onEquipItem: (i) => this.room?.send(ClientMessage.EquipItem, { slotIndex: i }),
     });
     this.inventoryOverlay.mount();
     this.input.keyboard!.on('keydown-I', () => {
       this.inventoryOverlay.toggle(this.inventory, this.equippedWeaponId);
     });
 
-    // HUD
-    this.statusText = this.add.text(10, 10, 'Conectando...', {
-      fontSize: '14px', color: '#ffff00', backgroundColor: '#00000088', padding: { x: 4, y: 2 },
-    }).setScrollFactor(0).setDepth(100);
-
-    this.hpText = this.add.text(10, 32, '', {
-      fontSize: '14px', color: '#ff6666', backgroundColor: '#00000088', padding: { x: 4, y: 2 },
-    }).setScrollFactor(0).setDepth(100);
-
-    this.nameText = this.add.text(10, 54, '', {
-      fontSize: '14px', color: '#88ccff', backgroundColor: '#00000088', padding: { x: 4, y: 2 },
-    }).setScrollFactor(0).setDepth(100);
-
-    this.statsText = this.add.text(10, 76, '', {
-      fontSize: '13px', color: '#aaffaa', backgroundColor: '#00000088', padding: { x: 4, y: 2 },
-    }).setScrollFactor(0).setDepth(100);
-
-    this.add.text(790, 10, 'I: Inv', {
-      fontSize: '12px', color: '#aaaaaa', backgroundColor: '#00000088', padding: { x: 4, y: 2 },
-    }).setScrollFactor(0).setDepth(100).setOrigin(1, 0);
-
-    this.add.text(790, 30, 'E: NPC/Portal', {
-      fontSize: '12px', color: '#aaaaaa', backgroundColor: '#00000088', padding: { x: 4, y: 2 },
-    }).setScrollFactor(0).setDepth(100).setOrigin(1, 0);
-
-    this.pingText = this.add.text(790, 50, 'Ping: --ms', {
-      fontSize: '12px', color: '#aaffaa', backgroundColor: '#00000088', padding: { x: 4, y: 2 },
-    }).setScrollFactor(0).setDepth(100).setOrigin(1, 0);
-
-    this.targetText = this.add.text(10, 98, '', {
-      fontSize: '13px', color: '#ff8888', backgroundColor: '#00000088', padding: { x: 4, y: 2 },
-    }).setScrollFactor(0).setDepth(100);
-
-    this.equippedWeaponText = this.add.text(10, 120, '', {
-      fontSize: '13px', color: '#ffdd88', backgroundColor: '#00000088', padding: { x: 4, y: 2 },
-    }).setScrollFactor(0).setDepth(100);
-
-    this.questText = this.add.text(10, 142, '', {
-      fontSize: '13px', color: '#99ddff', backgroundColor: '#00000088', padding: { x: 4, y: 2 },
-    }).setScrollFactor(0).setDepth(100);
-
-    this.updateQuestHUD();
+    this.buildHud();
 
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
+      this.mapRenderer.dispose();
       this.chatOverlay.dispose();
       this.inventoryOverlay.dispose();
       if (this.pingInterval !== null) {
@@ -225,325 +174,61 @@ export class GameScene extends Phaser.Scene {
     this.connectToServer();
   }
 
-  private createMapLayers() {
-    const groundData: number[][] = [];
-    const wallData: number[][] = [];
+  private buildHud() {
+    const D = MAP_DEPTH.HUD;
 
-    for (let y = 0; y < MAP_HEIGHT; y++) {
-      const groundRow: number[] = [];
-      const wallRow: number[] = [];
+    this.statusText = this.add.text(10, 10, 'Conectando...', {
+      fontSize: '14px', color: '#ffff00', backgroundColor: '#00000088', padding: { x: 4, y: 2 },
+    }).setScrollFactor(0).setDepth(D);
 
-      for (let x = 0; x < MAP_WIDTH; x++) {
-        const isWall = MAP_LAYOUT[y][x] === 1;
-        const inDungeonFloor =
-          x >= DUNGEON_FLOOR_ZONE.minX &&
-          x <= DUNGEON_FLOOR_ZONE.maxX &&
-          y >= DUNGEON_FLOOR_ZONE.minY &&
-          y <= DUNGEON_FLOOR_ZONE.maxY;
+    this.hpText = this.add.text(10, 32, '', {
+      fontSize: '14px', color: '#ff6666', backgroundColor: '#00000088', padding: { x: 4, y: 2 },
+    }).setScrollFactor(0).setDepth(D);
 
-        const inDesertBiome =
-          x >= DESERT_BIOME_ZONE.minX &&
-          x <= DESERT_BIOME_ZONE.maxX &&
-          y >= DESERT_BIOME_ZONE.minY &&
-          y <= DESERT_BIOME_ZONE.maxY;
+    this.nameText = this.add.text(10, 54, '', {
+      fontSize: '14px', color: '#88ccff', backgroundColor: '#00000088', padding: { x: 4, y: 2 },
+    }).setScrollFactor(0).setDepth(D);
 
-        const groundTile = inDungeonFloor
-          ? GameScene.TILE_DUNGEON_FLOOR
-          : inDesertBiome
-            ? GameScene.TILE_DESERT_FLOOR
-          : x < SAFE_ZONE_MAX_X
-            ? GameScene.TILE_SAFE_GRASS
-            : GameScene.TILE_COMBAT_GRASS;
+    this.statsText = this.add.text(10, 76, '', {
+      fontSize: '13px', color: '#aaffaa', backgroundColor: '#00000088', padding: { x: 4, y: 2 },
+    }).setScrollFactor(0).setDepth(D);
 
-        groundRow.push(groundTile);
-        wallRow.push(isWall ? GameScene.TILE_WALL : -1);
-      }
+    this.add.text(790, 10, 'I: Inv', {
+      fontSize: '12px', color: '#aaaaaa', backgroundColor: '#00000088', padding: { x: 4, y: 2 },
+    }).setScrollFactor(0).setDepth(D).setOrigin(1, 0);
 
-      groundData.push(groundRow);
-      wallData.push(wallRow);
-    }
+    this.add.text(790, 30, 'E: NPC/Portal', {
+      fontSize: '12px', color: '#aaaaaa', backgroundColor: '#00000088', padding: { x: 4, y: 2 },
+    }).setScrollFactor(0).setDepth(D).setOrigin(1, 0);
 
-    const groundMap = this.make.tilemap({
-      data: groundData,
-      tileWidth: TILE_SIZE,
-      tileHeight: TILE_SIZE,
-    });
-    const wallMap = this.make.tilemap({
-      data: wallData,
-      tileWidth: TILE_SIZE,
-      tileHeight: TILE_SIZE,
-    });
+    this.pingText = this.add.text(790, 50, 'Ping: --ms', {
+      fontSize: '12px', color: '#aaffaa', backgroundColor: '#00000088', padding: { x: 4, y: 2 },
+    }).setScrollFactor(0).setDepth(D).setOrigin(1, 0);
 
-    const groundTileset = groundMap.addTilesetImage('world_tiles', 'world_tiles', TILE_SIZE, TILE_SIZE, 0, 0);
-    const wallTileset = wallMap.addTilesetImage('world_tiles', 'world_tiles', TILE_SIZE, TILE_SIZE, 0, 0);
-    if (!groundTileset || !wallTileset) {
-      throw new Error('No se pudo crear el tileset del mapa');
-    }
+    this.coordsText = this.add.text(790, 70, '', {
+      fontSize: '12px', color: '#cccccc', backgroundColor: '#00000088', padding: { x: 4, y: 2 },
+    }).setScrollFactor(0).setDepth(D).setOrigin(1, 0);
 
-    const groundLayer = groundMap.createLayer(0, groundTileset, 0, 0);
-    const wallLayer = wallMap.createLayer(0, wallTileset, 0, 0);
-    groundLayer?.setDepth(0);
-    wallLayer?.setDepth(1);
+    this.targetText = this.add.text(10, 98, '', {
+      fontSize: '13px', color: '#ff8888', backgroundColor: '#00000088', padding: { x: 4, y: 2 },
+    }).setScrollFactor(0).setDepth(D);
 
-    // Zone divider line (safe zone | combat zone)
-    const divider = this.add.graphics();
-    divider.lineStyle(3, 0xffd700, 0.7);
-    divider.lineBetween(SAFE_ZONE_MAX_X * TILE_SIZE, 0, SAFE_ZONE_MAX_X * TILE_SIZE, MAP_HEIGHT * TILE_SIZE);
-    divider.setDepth(2);
+    this.equippedWeaponText = this.add.text(10, 120, '', {
+      fontSize: '13px', color: '#ffdd88', backgroundColor: '#00000088', padding: { x: 4, y: 2 },
+    }).setScrollFactor(0).setDepth(D);
 
-    // "Zona Segura" sign at the top of the divider
-    this.add.text(SAFE_ZONE_MAX_X * TILE_SIZE / 2, 8, '⚔ Zona Segura ⚔', {
-      fontSize: '10px', color: '#ffe066',
-      backgroundColor: '#00000077', padding: { x: 4, y: 2 },
-    }).setOrigin(0.5, 0).setDepth(3).setScrollFactor(1);
+    this.questText = this.add.text(10, 142, '', {
+      fontSize: '13px', color: '#99ddff', backgroundColor: '#00000088', padding: { x: 4, y: 2 },
+    }).setScrollFactor(0).setDepth(D);
 
-    // Desert biome marker
-    const desertDividerX = DESERT_BIOME_ZONE.minX * TILE_SIZE;
-    const desertDivider = this.add.graphics();
-    desertDivider.lineStyle(3, 0xffb347, 0.7);
-    desertDivider.lineBetween(desertDividerX, 0, desertDividerX, MAP_HEIGHT * TILE_SIZE);
-    desertDivider.setDepth(2);
-
-    this.add.text(
-      ((DESERT_BIOME_ZONE.minX + DESERT_BIOME_ZONE.maxX) / 2) * TILE_SIZE,
-      8,
-      '☀ Desierto de Ceniza ☀',
-      {
-        fontSize: '10px',
-        color: '#ffd59a',
-        backgroundColor: '#00000077',
-        padding: { x: 4, y: 2 },
-      },
-    ).setOrigin(0.5, 0).setDepth(3).setScrollFactor(1);
-  }
-
-  private addPortals() {
-    const portals = [
-      { name: 'Portal al Santuario', x: SAFE_PORTAL.x, y: SAFE_PORTAL.y },
-      { name: 'Portal al Campamento', x: DUNGEON_PORTAL.x, y: DUNGEON_PORTAL.y },
-    ];
-
-    for (const portal of portals) {
-      const px = portal.x * TILE_SIZE + TILE_SIZE / 2;
-      const py = portal.y * TILE_SIZE + TILE_SIZE / 2;
-
-      const sprite = this.add.image(0, 0, 'portal_rune');
-      const label = this.add.text(0, -TILE_SIZE / 2 - 8, portal.name, {
-        fontSize: '10px', color: '#d8c6ff', align: 'center',
-        backgroundColor: '#00000066', padding: { x: 3, y: 1 },
-      }).setOrigin(0.5, 1);
-
-      const hint = this.add.text(0, TILE_SIZE / 2 + 4, 'E: viajar', {
-        fontSize: '10px', color: '#f0e8ff', align: 'center',
-        backgroundColor: '#00000055', padding: { x: 2, y: 1 },
-      }).setOrigin(0.5, 0);
-
-      const container = this.add.container(px, py, [sprite, label, hint]);
-      container.setDepth(7);
-
-      this.tweens.add({
-        targets: sprite,
-        alpha: { from: 0.6, to: 1 },
-        duration: 900,
-        ease: 'Sine.InOut',
-        yoyo: true,
-        repeat: -1,
-      });
-
-      this.portalContainers.push(container);
-    }
-  }
-
-  private addQuestNpc() {
-    const x = QUEST_NPC.x * TILE_SIZE + TILE_SIZE / 2;
-    const y = QUEST_NPC.y * TILE_SIZE + TILE_SIZE / 2;
-
-    const sprite = this.add.image(0, 0, 'npc_questgiver');
-    const label = this.add.text(0, -TILE_SIZE / 2 - 8, QUEST_NPC.name, {
-      fontSize: '11px', color: '#ffe8a3', align: 'center',
-      backgroundColor: '#00000066', padding: { x: 3, y: 1 },
-    }).setOrigin(0.5, 1);
-
-    const hint = this.add.text(0, TILE_SIZE / 2 + 4, 'E: hablar', {
-      fontSize: '10px', color: '#fff4cc', align: 'center',
-      backgroundColor: '#00000055', padding: { x: 2, y: 1 },
-    }).setOrigin(0.5, 0);
-
-    this.npcContainer = this.add.container(x, y, [sprite, label, hint]);
-    this.npcContainer.setDepth(7);
-  }
-
-  private addMerchantNpc() {
-    const x = MERCHANT_NPC.x * TILE_SIZE + TILE_SIZE / 2;
-    const y = MERCHANT_NPC.y * TILE_SIZE + TILE_SIZE / 2;
-
-    const sprite = this.add.image(0, 0, 'npc_questgiver');
-    const label = this.add.text(0, -TILE_SIZE / 2 - 8, MERCHANT_NPC.name, {
-      fontSize: '11px', color: '#b8f5b8', align: 'center',
-      backgroundColor: '#00000066', padding: { x: 3, y: 1 },
-    }).setOrigin(0.5, 1);
-
-    const hint = this.add.text(0, TILE_SIZE / 2 + 4, 'E: comerciar', {
-      fontSize: '10px', color: '#dcffdc', align: 'center',
-      backgroundColor: '#00000055', padding: { x: 2, y: 1 },
-    }).setOrigin(0.5, 0);
-
-    this.merchantNpcContainer = this.add.container(x, y, [sprite, label, hint]);
-    this.merchantNpcContainer.setDepth(7);
-  }
-
-  private addPriestNpc() {
-    const x = PRIEST_NPC.x * TILE_SIZE + TILE_SIZE / 2;
-    const y = PRIEST_NPC.y * TILE_SIZE + TILE_SIZE / 2;
-
-    const sprite = this.add.image(0, 0, 'npc_questgiver');
-    const label = this.add.text(0, -TILE_SIZE / 2 - 8, PRIEST_NPC.name, {
-      fontSize: '11px', color: '#ffd6e6', align: 'center',
-      backgroundColor: '#00000066', padding: { x: 3, y: 1 },
-    }).setOrigin(0.5, 1);
-
-    const hint = this.add.text(0, TILE_SIZE / 2 + 4, 'E: revivir', {
-      fontSize: '10px', color: '#ffd6e6', align: 'center',
-      backgroundColor: '#00000055', padding: { x: 2, y: 1 },
-    }).setOrigin(0.5, 0);
-
-    const container = this.add.container(x, y, [sprite, label, hint]);
-    container.setDepth(7);
-  }
-
-  private addHouses() {
-    for (const h of HOUSES) {
-      const interiorTiles: Phaser.GameObjects.Image[] = [];
-
-      // ── Interior floor (visible under translucent roof when inside) ──
-      for (let yy = h.interiorMinY; yy <= h.interiorMaxY; yy++) {
-        for (let xx = h.interiorMinX; xx <= h.interiorMaxX; xx++) {
-          const floor = this.add.image(xx * TILE_SIZE + TILE_SIZE / 2, yy * TILE_SIZE + TILE_SIZE / 2, 'interior_floor');
-          floor.setDepth(6);
-          interiorTiles.push(floor);
-        }
-      }
-
-      // ── Front face: only the BOTTOM row visible (top-down perspective) ──
-      // Back/side walls are hidden under the roof — only the front facade is shown.
-      const frontY = h.y + h.height - 1;
-      for (let xx = h.x; xx < h.x + h.width; xx++) {
-        if (xx === h.doorX && frontY === h.doorY) continue; // door rendered separately
-        const px = xx * TILE_SIZE + TILE_SIZE / 2;
-        const py = frontY * TILE_SIZE + TILE_SIZE / 2;
-        // Windows beside the door on the front face
-        const isWindow = (xx === h.x + 1 || xx === h.x + h.width - 2);
-        this.add.image(px, py, isWindow ? 'house_wall_window' : 'house_wall').setDepth(8);
-      }
-
-      // Door: wall backing + door sprite on top
-      const doorPx = h.doorX * TILE_SIZE + TILE_SIZE / 2;
-      const doorPy = h.doorY * TILE_SIZE + TILE_SIZE / 2;
-      this.add.image(doorPx, doorPy, 'house_wall').setDepth(8);
-      const door = this.add.image(doorPx, doorPy, 'door_closed').setDepth(9);
-
-      // ────────────────────────────────────────────────────────────────────
-      // Roof: flat top-down view of a clay-tile roof with 3/4 perspective cues
-      //   • Covers all rows except the front face row (which stays always seen)
-      //   • Small overhang extends ~0.35 tiles over the front face to cast shadow
-      //   • Shingle gradient: very dark at the back (far from viewer) →
-      //     warm terracotta at the front eave (close to viewer)
-      //   • Staggered vertical joints + ridge cap + side shadows + chimney
-      // ────────────────────────────────────────────────────────────────────
-      const roofGfx = this.add.graphics();
-
-      const ovhX   = 0.3;   // side overhang (tiles)
-      const ovhTop = 0.2;   // back-edge overhang (tiles)
-      const ovhBot = 0.35;  // front overhang into front-face row (tiles)
-
-      const rx = (h.x - ovhX) * TILE_SIZE;
-      const ry = (h.y - ovhTop) * TILE_SIZE;
-      const rw = (h.width + ovhX * 2) * TILE_SIZE;
-      // Covers rows h.y..h.y+height-2 (all except front), plus front overhang
-      const rh = (h.height - 1 + ovhBot) * TILE_SIZE;
-
-      // Shingle rows with dark-back → warm-front gradient
-      const shingleH = 7;
-      const numRows  = Math.ceil(rh / shingleH);
-      for (let row = 0; row < numRows; row++) {
-        const t  = row / Math.max(1, numRows - 1);  // 0 = back, 1 = front
-        const cr = Math.min(255, Math.round(0x46 + t * 0x44));
-        const cg = Math.min(255, Math.round(0x12 + t * 0x24));
-        const cb = Math.min(255, Math.round(0x04 + t * 0x10));
-        // Alternate rows slightly lighter for individual tile definition
-        const dr = row % 2 === 0 ? cr : Math.min(255, cr + 16);
-        const dg = row % 2 === 0 ? cg : Math.min(255, cg + 9);
-        const db = row % 2 === 0 ? cb : Math.min(255, cb + 5);
-
-        roofGfx.fillStyle((dr << 16) | (dg << 8) | db);
-        const rowY = ry + row * shingleH;
-        roofGfx.fillRect(rx, rowY, rw, Math.min(shingleH - 1, ry + rh - rowY));
-
-        // Staggered vertical joints between shingles
-        roofGfx.fillStyle(0x240804, 0.55);
-        const jointOfs = (row % 2 === 0) ? 0 : TILE_SIZE * 0.45;
-        for (let jx = rx + jointOfs; jx < rx + rw; jx += TILE_SIZE * 0.9) {
-          roofGfx.fillRect(Math.round(jx), rowY, 1, shingleH - 1);
-        }
-      }
-
-      // Ridge cap at the very back edge (highest visible point of the roof)
-      roofGfx.fillStyle(0xb86838);
-      roofGfx.fillRect(rx + 10, ry, rw - 20, 6);
-      roofGfx.fillStyle(0xd89060, 0.65);
-      roofGfx.fillRect(rx + 13, ry + 1, rw - 26, 3);
-
-      // Light highlight — upper-right ambient light
-      roofGfx.fillStyle(0xffffff, 0.06);
-      roofGfx.fillTriangle(rx + rw * 0.6, ry, rx + rw + 2, ry, rx + rw + 2, ry + rh);
-
-      // Shadow band — left side
-      roofGfx.fillStyle(0x000000, 0.1);
-      roofGfx.fillTriangle(rx - 2, ry, rx + rw * 0.4, ry, rx - 2, ry + rh);
-
-      // Front eave lip (closest edge to viewer — bright terracotta cap)
-      roofGfx.fillStyle(0xaa5230, 0.95);
-      roofGfx.fillRect(rx, ry + rh - 6, rw, 6);
-
-      // Drop shadow cast downward from eave onto tops of front wall tiles
-      roofGfx.fillStyle(0x000000, 0.35);
-      roofGfx.fillRect(rx + 3, ry + rh, rw - 6, 7);
-
-      // Side gable edges (shadow on the left, slight highlight on the right)
-      roofGfx.fillStyle(0x2e0e04, 0.85);
-      roofGfx.fillRect(rx, ry, Math.round(TILE_SIZE * 0.28), rh);
-      roofGfx.fillStyle(0x7a3820, 0.7);
-      roofGfx.fillRect(rx + rw - Math.round(TILE_SIZE * 0.28), ry, Math.round(TILE_SIZE * 0.28), rh);
-
-      // Chimney (brick stack, slightly off-center toward right)
-      const chimneyX = Math.round((h.x + h.width * 0.62) * TILE_SIZE);
-      const chimneyTop = Math.round(ry + rh * 0.08);
-      roofGfx.fillStyle(0xa06848);
-      roofGfx.fillRect(chimneyX - 5, chimneyTop, 11, 14);
-      // Chimney cap (slightly wider, darker)
-      roofGfx.fillStyle(0x6a4028);
-      roofGfx.fillRect(chimneyX - 7, chimneyTop - 3, 15, 4);
-      // Soot darkening around top opening
-      roofGfx.fillStyle(0x1a0a04, 0.4);
-      roofGfx.fillRect(chimneyX - 5, chimneyTop - 1, 11, 3);
-
-      roofGfx.setDepth(50);
-
-      this.houseContainers.set(h.id, {
-        container: this.add.container(0, 0, []),
-        roof: roofGfx,
-        door,
-        interiorTiles,
-        defId: h.id,
-      });
-    }
+    this.questText.setText('');
   }
 
   private addChatMessage(name: string, message: string, kind: 'chat' | 'system' | 'whisper' | 'loot') {
     this.chatOverlay.addMessage(name, message, kind);
   }
 
-  private async connectToServer() {
+  private async connectToServer(attempt = 1): Promise<void> {
     this.client = new Client(GAME_SERVER_URL);
 
     const params = new URLSearchParams(window.location.search);
@@ -567,8 +252,7 @@ export class GameScene extends Phaser.Scene {
       const $ = Callbacks.get(this.room);
 
       this.registerStateCallbacks($);
-
-      this.registerRoomMessageHandlers();
+      this.registerMessageHandlers();
 
       // Start ping loop every 2 seconds
       this.pingInterval = setInterval(() => {
@@ -579,7 +263,25 @@ export class GameScene extends Phaser.Scene {
 
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'No se pudo conectar';
+      const normalized = message.toLowerCase();
+      const isSeatReservationExpired =
+        normalized.includes('seat reservation') && normalized.includes('expired');
+
       console.error('[GameScene] Connection error:', err);
+
+      if (isSeatReservationExpired && attempt < 3) {
+        this.statusText.setText(`Reintentando conexión... (${attempt}/2)`);
+        await new Promise<void>((resolve) => {
+          this.time.delayedCall(500, () => resolve());
+        });
+        return this.connectToServer(attempt + 1);
+      }
+
+      if (isSeatReservationExpired) {
+        this.statusText.setText('Error: sesión de juego expirada. Volvé a Personajes y entrá de nuevo.');
+        return;
+      }
+
       this.statusText.setText(`Error: ${message}`);
     }
   }
@@ -596,6 +298,23 @@ export class GameScene extends Phaser.Scene {
       callbacks.onChange(player, () => {
         this.updatePlayerSprite(sid, player as PlayerData);
       });
+      // When the local player joins, request AO map data if on an AO map
+      if (sid === this.mySessionId) {
+        const pd = player as PlayerData;
+        this.lastSentX = Math.round(pd.x);
+        this.lastSentY = Math.round(pd.y);
+        this.predictedTileX = this.lastSentX;
+        this.predictedTileY = this.lastSentY;
+        this.nextMoveAt = 0;
+        if (pd.currentMapId > 0) {
+          this.currentMapId = pd.currentMapId;
+          this.mapRenderer.clear();
+          this.statusText.setText('Cargando mapa...');
+          this.room.send(ClientMessage.RequestMapData, { mapId: pd.currentMapId });
+        } else {
+          this.statusText.setText('Error: mapa no soportado por el cliente.');
+        }
+      }
     });
 
     callbacks.onRemove('players', (_player: unknown, sessionId: unknown) => {
@@ -614,9 +333,19 @@ export class GameScene extends Phaser.Scene {
     callbacks.onRemove('enemies', (_enemy: unknown, enemyId: unknown) => {
       this.removeEnemySprite(enemyId as string);
     });
+
+    // --- Passive NPCs ---
+    callbacks.onAdd('npcs', (npc: unknown, npcId: unknown) => {
+      const nid = npcId as string;
+      this.addNpcSprite(nid, npc as NpcData);
+    });
+
+    callbacks.onRemove('npcs', (_npc: unknown, npcId: unknown) => {
+      this.removeNpcSprite(npcId as string);
+    });
   }
 
-  private registerRoomMessageHandlers() {
+  private registerMessageHandlers() {
     // --- Chat ---
     this.room.onMessage(ClientMessage.Chat, (data: { sessionId: string; name: string; message: string }) => {
       this.addChatMessage(data.name, data.message, 'chat');
@@ -638,15 +367,9 @@ export class GameScene extends Phaser.Scene {
       this.addChatMessage(data.npcName, data.message, 'system');
     });
 
-    this.room.onMessage(ServerMessage.DoorState, (data: { id: string; open: boolean }) => {
-      const h = this.houseContainers.get(data.id);
-      if (!h) return;
-      h.door.setTexture(data.open ? 'door_open' : 'door_closed');
-    });
-
     this.room.onMessage(ServerMessage.QuestState, (data: QuestStateData) => {
       this.questProgress = data;
-      this.updateQuestHUD();
+      this.questText.setText('');
     });
 
     // --- Damage numbers ---
@@ -723,7 +446,7 @@ export class GameScene extends Phaser.Scene {
     // --- Item equipped / unequipped ---
     this.room.onMessage(ServerMessage.ItemEquipped, (data: { itemId: number; weaponName: string | null; damage: number }) => {
       this.equippedWeaponId = data.itemId;
-      this.updateEquippedWeaponHUD(data.weaponName, data.damage);
+      this.updateEquippedWeaponHud(data.weaponName, data.damage);
       this.inventoryOverlay.render(this.inventory, this.equippedWeaponId);
     });
 
@@ -737,136 +460,210 @@ export class GameScene extends Phaser.Scene {
       const color = latency < 80 ? '#aaffaa' : latency < 200 ? '#ffdd88' : '#ff6666';
       this.pingText.setColor(color).setText(`Ping: ${latency}ms`);
     });
+
+    // --- Map data (AO world) ---
+    this.room.onMessage(ServerMessage.MapData, (data: MapDefinition) => {
+      void this.handleMapData(data);
+    });
+
+    // --- Map transition ---
+    this.room.onMessage(ServerMessage.MapTransition, (data: { mapId: number; x: number; y: number; mapName: string }) => {
+      this.currentMapId = data.mapId;
+      this.addChatMessage('Portal', `Entraste a ${data.mapName}`, 'system');
+      this.mapRenderer.clear();
+      if (data.mapId > 0) {
+        this.statusText.setText('Cargando mapa...');
+        this.room.send(ClientMessage.RequestMapData, { mapId: data.mapId });
+      } else {
+        this.statusText.setText('Error: mapa no soportado por el cliente.');
+      }
+    });
+  }
+
+  // ==================== AO MAP RENDERING ====================
+
+  private async handleMapData(map: MapDefinition): Promise<void> {
+    this.currentMapId = map.mapId;
+    try {
+      const appearances = Array.from(
+        (this.room.state.players as Map<string, PlayerData>).values(),
+      ).map((p) => ({ idBody: p.idBody || 1, idHead: p.idHead || 1, idHelmet: p.idHelmet || 0 }));
+
+      await this.mapRenderer.bootstrap(appearances);
+      await this.mapRenderer.preloadMapAssets(map);
+
+      // Precargar assets de NPCs pasivos y enemigos antes de renderizarlos
+      const npcMap = this.room.state.npcs as Map<string, NpcData>;
+      const enemyMap = this.room.state.enemies as Map<string, EnemyData>;
+      const appearancesToPreload: { idBody: number; idHead: number }[] = [];
+      if (npcMap) {
+        for (const npc of npcMap.values()) {
+          if (npc.idBody) appearancesToPreload.push({ idBody: npc.idBody, idHead: npc.idHead || 0 });
+        }
+      }
+      if (enemyMap) {
+        for (const enemy of enemyMap.values()) {
+          if (enemy.idBody && enemy.idBody > 0) {
+            appearancesToPreload.push({ idBody: enemy.idBody, idHead: enemy.idHead ?? 0 });
+          }
+        }
+      }
+      if (appearancesToPreload.length) {
+        await this.mapRenderer.preloadAppearances(appearancesToPreload);
+      }
+
+      this.mapRenderer.buildMap(map);
+      this.statusText.setText('');
+
+      // Aplicar capas a jugadores que ya estaban antes de que el renderer estuviera listo
+      this.playerSprites.forEach((container, sid) => {
+        const p = this.room.state.players.get(sid) as PlayerData | undefined;
+        if (p) this.applyCharacterLayers(container, sid, p);
+      });
+
+      // Re-aplicar capas a NPCs pasivos (el renderer cargó los assets del mapa)
+      this.npcSprites.forEach((container, nid) => {
+        const npcMap = this.room.state.npcs as Map<string, NpcData>;
+        const npc = npcMap?.get(nid);
+        if (npc) {
+          this.mapRenderer.applyCharacterLayers(container, {
+            idBody:    npc.idBody || 1,
+            idHead:    npc.idHead || 0,
+            idHelmet:  0,
+            direction: 'down',
+            name:      npc.name,
+            nameColor: '#44ff88',
+            ghost:     false,
+            dead:      false,
+          });
+        }
+      });
+
+      // Re-aplicar capas a enemigos con apariencia AO
+      this.enemySprites.forEach((container, eid) => {
+        const enemyMap = this.room.state.enemies as Map<string, EnemyData>;
+        const enemy = enemyMap?.get(eid);
+        if (enemy && enemy.idBody && enemy.idBody > 0) {
+          this.mapRenderer.applyCharacterLayers(container, {
+            idBody:    enemy.idBody,
+            idHead:    enemy.idHead ?? 0,
+            idHelmet:  0,
+            direction: enemy.direction || 'down',
+            name:      enemy.name,
+            nameColor: '#ff4444',
+            ghost:     false,
+            dead:      false,
+          });
+        }
+      });
+    } catch (err) {
+      console.error('[GameScene] Error cargando mapa:', err);
+      this.mapRenderer.clear();
+      this.statusText.setText('Error cargando mapa. Revisar assets.');
+    }
   }
 
   // ==================== PLAYER SPRITES ====================
 
   private addPlayerSprite(sessionId: string, player: PlayerData) {
     const isSelf = sessionId === this.mySessionId;
-    const sprite = this.add.image(0, 0, isSelf ? 'player_self' : 'player_other');
-    const label = this.add.text(0, -TILE_SIZE / 2 - 6, player.name, {
-      fontSize: '11px', color: isSelf ? '#88ccff' : '#ffcc66', align: 'center',
-    }).setOrigin(0.5, 1);
-
     const hpBar = this.add.graphics();
-    const container = this.add.container(
-      player.x * TILE_SIZE + TILE_SIZE / 2,
-      player.y * TILE_SIZE + TILE_SIZE / 2,
-      [hpBar, sprite, label],
-    );
-    container.setDepth(10);
-    container.setData('targetX', player.x * TILE_SIZE + TILE_SIZE / 2);
-    container.setData('targetY', player.y * TILE_SIZE + TILE_SIZE / 2);
-    container.setData('hpBar', hpBar);
-    container.setData('sprite', sprite);
-    container.setData('label', label);
+    const label = this.add.text(0, TILE_SIZE / 2 + 4, player.name, {
+      fontSize: '14px', fontStyle: 'bold', color: isSelf ? '#0066cc' : '#ffcc66', align: 'center',
+      stroke: '#000000', strokeThickness: 3,
+    }).setOrigin(0.5, 0);
+
+    const startX = player.x * TILE_SIZE + TILE_SIZE / 2;
+    const startY = player.y * TILE_SIZE + TILE_SIZE / 2;
+    const container = this.add.container(startX, startY, [hpBar, label]);
+    // Depth is dynamic: container.y is updated every frame in interpolateSprites
+    // so it Y-sorts correctly with decoration sprites ((tileY+1)*TILE_SIZE).
+    container.setDepth(startY);
+    container.setData('targetX',    player.x * TILE_SIZE + TILE_SIZE / 2);
+    container.setData('targetY',    player.y * TILE_SIZE + TILE_SIZE / 2);
+    container.setData('hpBar',      hpBar);
+    container.setData('label',      label);
     container.setData('ghostTween', null);
 
-    // If the player is already a ghost on spawn, apply ghost visuals/tween
     if (player.ghost) {
-      sprite.setTexture('player_ghost');
-      sprite.setAlpha(0.95);
       label.setColor('#dff8ff');
-      const tween = this.tweens.add({
-        targets: sprite,
-        y: { from: -6, to: -2 },
-        duration: 900,
-        ease: 'Sine.InOut',
-        yoyo: true,
-        repeat: -1,
-      });
-      container.setData('ghostTween', tween);
     }
 
     this.drawHpBar(hpBar, player.hp, player.hpMax);
     this.playerSprites.set(sessionId, container);
 
     if (isSelf) {
-      this.cameras.main.startFollow(container, true, 0.1, 0.1);
+      this.cameras.main.startFollow(container, true, 1, 1);
       this.cameras.main.centerOn(container.x, container.y);
-      this.updateHUD(player);
-      this.updateQuestFromPlayerState(player);
-      // Sync equipped weapon from initial state
+      this.updatePlayerHud(player);
+      this.syncQuestFromPlayer(player);
       if (player.equippedWeaponId > 0) {
         this.equippedWeaponId = player.equippedWeaponId;
         const def = ITEM_DEFINITIONS[player.equippedWeaponId];
-        this.updateEquippedWeaponHUD(def?.name ?? null, def?.damage ?? 0);
+        this.updateEquippedWeaponHud(def?.name ?? null, def?.damage ?? 0);
       }
     }
+
+    // Apply AO character layers
+    this.applyCharacterLayers(container, sessionId, player);
+  }
+
+  /** Delega las capas visuales AO a AoMapRenderer. */
+  private applyCharacterLayers(
+    container: Phaser.GameObjects.Container,
+    sessionId: string,
+    player: PlayerData,
+  ): void {
+    this.mapRenderer.applyCharacterLayers(container, {
+      idBody:    player.idBody   || 1,
+      idHead:    player.idHead   || 1,
+      idHelmet:  player.idHelmet || 0,
+      direction: player.direction || 'down',
+      name:      player.name,
+      nameColor: sessionId === this.mySessionId ? '#88ccff' : '#ffcc66',
+      ghost:     player.ghost,
+      dead:      player.dead,
+    });
   }
 
   private updatePlayerSprite(sessionId: string, player: PlayerData) {
     const container = this.playerSprites.get(sessionId);
     if (!container) return;
 
+    if (sessionId === this.mySessionId) {
+      const authX = Math.round(player.x);
+      const authY = Math.round(player.y);
+      const predictedInvalid = !Number.isFinite(this.predictedTileX) || !Number.isFinite(this.predictedTileY);
+      const tooFarFromAuth =
+        Math.abs(authX - this.predictedTileX) > 3 || Math.abs(authY - this.predictedTileY) > 3;
+      const reachedPredicted = authX === this.predictedTileX && authY === this.predictedTileY;
+      if (predictedInvalid || tooFarFromAuth || reachedPredicted) {
+        this.predictedTileX = authX;
+        this.predictedTileY = authY;
+        this.lastSentX = authX;
+        this.lastSentY = authY;
+      }
+    }
+
     container.setData('targetX', player.x * TILE_SIZE + TILE_SIZE / 2);
     container.setData('targetY', player.y * TILE_SIZE + TILE_SIZE / 2);
-    // Keep container visible for ghosts; fade only truly-dead (non-ghost) players
     container.setAlpha((player.dead && !player.ghost) ? 0.3 : 1);
 
     const hpBar = container.getData('hpBar') as Phaser.GameObjects.Graphics;
     if (hpBar) this.drawHpBar(hpBar, player.hp, player.hpMax);
 
-    // Manage sprite/label references and ghost visuals
-    let sprite = container.getData('sprite') as Phaser.GameObjects.Image | undefined;
-    if (!sprite) {
-      sprite = container.list.find((s) => s instanceof Phaser.GameObjects.Image) as Phaser.GameObjects.Image | undefined;
-      if (sprite) container.setData('sprite', sprite);
+    // Update name label color for ghost/alive transitions
+    const label = container.getData('label') as Phaser.GameObjects.Text | undefined;
+    if (label) {
+      label.setColor(player.ghost ? '#dff8ff' : (sessionId === this.mySessionId ? '#0066cc' : '#ffcc66'));
     }
 
-    let label = container.getData('label') as Phaser.GameObjects.Text | undefined;
-    if (!label) {
-      label = container.list.find((s) => s instanceof Phaser.GameObjects.Text) as Phaser.GameObjects.Text | undefined;
-      if (label) container.setData('label', label);
-    }
-
-    if (player.ghost) {
-      if (sprite && sprite.texture.key !== 'player_ghost') sprite.setTexture('player_ghost');
-      if (sprite) sprite.setAlpha(0.95);
-      if (label) label.setColor('#dff8ff');
-
-      let ghostTween = container.getData('ghostTween') as Phaser.Tweens.Tween | null;
-      if (!ghostTween && sprite) {
-        ghostTween = this.tweens.add({
-          targets: sprite,
-          y: { from: -6, to: -2 },
-          duration: 900,
-          ease: 'Sine.InOut',
-          yoyo: true,
-          repeat: -1,
-        });
-        container.setData('ghostTween', ghostTween);
-      }
-    } else {
-      const ghostTween = container.getData('ghostTween') as Phaser.Tweens.Tween | undefined;
-      if (ghostTween) {
-        ghostTween.stop();
-        ghostTween.remove();
-        container.setData('ghostTween', null);
-      }
-      if (sprite) {
-        sprite.y = 0;
-        sprite.setAlpha(1);
-        const isSelf = sessionId === this.mySessionId;
-        const desiredKey = isSelf ? 'player_self' : 'player_other';
-        if (sprite.texture.key !== desiredKey) sprite.setTexture(desiredKey);
-      }
-      if (label) label.setColor(sessionId === this.mySessionId ? '#88ccff' : '#ffcc66');
-    }
+    // Apply / refresh AO character layers
+    this.applyCharacterLayers(container, sessionId, player);
 
     if (sessionId === this.mySessionId) {
-      this.updateHUD(player);
-      this.updateQuestFromPlayerState(player);
-    }
-
-    // If this is the local player, manage roof translucency for houses (show interior only when inside)
-    if (sessionId === this.mySessionId) {
-      for (const [id, h] of this.houseContainers.entries()) {
-        const def = HOUSES.find((x) => x.id === id);
-        if (!def) continue;
-        const inside = player.x >= def.interiorMinX && player.x <= def.interiorMaxX && player.y >= def.interiorMinY && player.y <= def.interiorMaxY;
-        h.roof.setAlpha(inside ? 0.25 : 1);
-      }
+      this.updatePlayerHud(player);
+      this.syncQuestFromPlayer(player);
     }
   }
 
@@ -881,19 +678,11 @@ export class GameScene extends Phaser.Scene {
   // ==================== ENEMY SPRITES ====================
 
   private addEnemySprite(enemyId: string, enemy: EnemyData) {
-    const texKey = `enemy_${enemy.enemyType}`;
-    const sprite = this.add.image(0, 0, texKey);
-    const label = this.add.text(0, -TILE_SIZE / 2 - 6, enemy.name, {
-      fontSize: '10px', color: '#ff4444', align: 'center',
-    }).setOrigin(0.5, 1);
-
     const hpBar = this.add.graphics();
-    const container = this.add.container(
-      enemy.x * TILE_SIZE + TILE_SIZE / 2,
-      enemy.y * TILE_SIZE + TILE_SIZE / 2,
-      [hpBar, sprite, label],
-    );
-    container.setDepth(5);
+    const eStartX = enemy.x * TILE_SIZE + TILE_SIZE / 2;
+    const eStartY = enemy.y * TILE_SIZE + TILE_SIZE / 2;
+    const container = this.add.container(eStartX, eStartY, [hpBar]);
+    container.setDepth(eStartY);
     container.setData('targetX', enemy.x * TILE_SIZE + TILE_SIZE / 2);
     container.setData('targetY', enemy.y * TILE_SIZE + TILE_SIZE / 2);
     container.setData('hpBar', hpBar);
@@ -902,12 +691,48 @@ export class GameScene extends Phaser.Scene {
     this.drawHpBar(hpBar, enemy.hp, enemy.hpMax);
     this.enemySprites.set(enemyId, container);
 
+    if (enemy.idBody && enemy.idBody > 0) {
+      // Preload AO body/head assets, then apply layered character visuals
+      void this.mapRenderer
+        .preloadAppearances([{ idBody: enemy.idBody, idHead: enemy.idHead ?? 0 }])
+        .then(() => {
+          if (!this.enemySprites.has(enemyId)) return;
+          this.mapRenderer.applyCharacterLayers(container, {
+            idBody:    enemy.idBody!,
+            idHead:    enemy.idHead ?? 0,
+            idHelmet:  0,
+            direction: enemy.direction || 'down',
+            name:      enemy.name,
+            nameColor: '#ff4444',
+            ghost:     false,
+            dead:      false,
+          });
+        });
+    } else {
+      // No AO appearance — generate a visible placeholder texture
+      const texKey = `enemy_placeholder_${enemy.enemyType}`;
+      if (!this.textures.exists(texKey)) {
+        const gfx = this.add.graphics();
+        gfx.fillStyle(0x441111, 1);
+        gfx.fillRect(0, 0, TILE_SIZE, TILE_SIZE);
+        gfx.lineStyle(2, 0xff4444);
+        gfx.strokeRect(1, 1, TILE_SIZE - 2, TILE_SIZE - 2);
+        gfx.generateTexture(texKey, TILE_SIZE, TILE_SIZE);
+        gfx.destroy();
+      }
+      const fallbackSprite = this.add.image(0, 0, texKey);
+      const fallbackLabel = this.add.text(0, -TILE_SIZE / 2 - 6, enemy.name, {
+        fontSize: '10px', color: '#ff4444', align: 'center',
+      }).setOrigin(0.5, 1);
+      container.add([fallbackSprite, fallbackLabel]);
+    }
+
     // Click to select enemy
     container.setSize(TILE_SIZE, TILE_SIZE);
     container.setInteractive();
     container.on('pointerdown', () => {
       this.selectedEnemyId = enemyId;
-      this.updateTargetHUD(enemy);
+      this.updateTargetHud(enemy);
     });
   }
 
@@ -922,7 +747,21 @@ export class GameScene extends Phaser.Scene {
     if (hpBar) this.drawHpBar(hpBar, enemy.hp, enemy.hpMax);
 
     if (this.selectedEnemyId === enemyId) {
-      this.updateTargetHUD(enemy);
+      this.updateTargetHud(enemy);
+    }
+
+    // Refresh direction on AO layered enemies
+    if (enemy.idBody && enemy.idBody > 0) {
+      this.mapRenderer.applyCharacterLayers(container, {
+        idBody:    enemy.idBody,
+        idHead:    enemy.idHead ?? 0,
+        idHelmet:  0,
+        direction: enemy.direction || 'down',
+        name:      enemy.name,
+        nameColor: '#ff4444',
+        ghost:     false,
+        dead:      false,
+      });
     }
   }
 
@@ -931,6 +770,44 @@ export class GameScene extends Phaser.Scene {
     if (container) {
       container.destroy();
       this.enemySprites.delete(enemyId);
+    }
+  }
+
+  // ==================== NPC SPRITES ====================
+
+  private addNpcSprite(npcId: string, npc: NpcData) {
+    const label = this.add.text(0, TILE_SIZE / 2 + 4, npc.name, {
+      fontSize: '12px', color: '#44ff88', align: 'center',
+      stroke: '#000000', strokeThickness: 3,
+    }).setOrigin(0.5, 0);
+
+    const px = npc.x * TILE_SIZE + TILE_SIZE / 2;
+    const py = npc.y * TILE_SIZE + TILE_SIZE / 2;
+    const container = this.add.container(px, py, [label]);
+    container.setDepth(py);
+    this.npcSprites.set(npcId, container);
+
+    // Preload NPC assets then apply layers (async to handle late-arriving NPCs)
+    void this.mapRenderer.preloadAppearances([{ idBody: npc.idBody || 1, idHead: npc.idHead || 0 }]).then(() => {
+      if (!this.npcSprites.has(npcId)) return; // NPC was removed while loading
+      this.mapRenderer.applyCharacterLayers(container, {
+        idBody:    npc.idBody || 1,
+        idHead:    npc.idHead || 0,
+        idHelmet:  0,
+        direction: 'down',
+        name:      npc.name,
+        nameColor: '#44ff88',
+        ghost:     false,
+        dead:      false,
+      });
+    });
+  }
+
+  private removeNpcSprite(npcId: string) {
+    const container = this.npcSprites.get(npcId);
+    if (container) {
+      container.destroy();
+      this.npcSprites.delete(npcId);
     }
   }
 
@@ -960,7 +837,7 @@ export class GameScene extends Phaser.Scene {
     gfx.clear();
     const w = TILE_SIZE - 4;
     const h = 4;
-    const yOff = -TILE_SIZE / 2 - 14;
+    const yOff = -TILE_SIZE / 2 - 30;
     gfx.fillStyle(0x333333);
     gfx.fillRect(-w / 2, yOff, w, h);
     const ratio = Math.max(0, hp / (hpMax || 100));
@@ -971,50 +848,32 @@ export class GameScene extends Phaser.Scene {
 
   // ==================== HUD ====================
 
-  private updateHUD(player: PlayerData) {
+  private updatePlayerHud(player: PlayerData) {
     this.hpText.setText(`HP: ${player.hp}/${player.hpMax}`);
     this.nameText.setText(`${player.name} — Nivel ${player.level} — ${player.characterClass}`);
     const xpNeeded = player.level * 100;
     this.statsText.setText(`XP: ${player.xp}/${xpNeeded}  |  Oro: ${player.gold}`);
+    this.coordsText.setText(`Mapa: ${player.currentMapId}  X: ${Math.round(player.x)}  Y: ${Math.round(player.y)}`);
   }
 
-  private updateTargetHUD(enemy: EnemyData) {
+  private updateTargetHud(enemy: EnemyData) {
     this.targetText.setText(`Objetivo: ${enemy.name} — HP: ${enemy.hp}/${enemy.hpMax}`);
   }
 
-  private updateEquippedWeaponHUD(weaponName: string | null, damage: number) {
-    if (weaponName) {
-      this.equippedWeaponText.setText(`Arma: ${weaponName} (+${damage} dmg)`);
-    } else {
-      this.equippedWeaponText.setText('');
-    }
+  private updateEquippedWeaponHud(weaponName: string | null, damage: number) {
+    this.equippedWeaponText.setText(weaponName ? `Arma: ${weaponName} (+${damage} dmg)` : '');
   }
 
-  private updateQuestFromPlayerState(player: PlayerData) {
+  private syncQuestFromPlayer(player: PlayerData) {
     this.questProgress = {
-      questId: 'slime_hunt_1',
-      targetName: 'Slime',
-      kills: player.questSlimeKills ?? 0,
-      goal: QUEST_SLIME_REQUIRED_KILLS,
+      ...this.questProgress,
+      kills:     player.questSlimeKills ?? 0,
       completed: player.questSlimeCompleted ?? false,
-      rewardGold: this.questProgress.rewardGold,
     };
-    this.updateQuestHUD();
+    this.questText.setText('');
   }
 
-  private updateQuestHUD() {
-    if (this.questProgress.completed) {
-      this.questText.setColor('#aaffaa');
-      this.questText.setText('Mision: Slimes limpiados - completada');
-      return;
-    }
-
-    const goal = this.questProgress.goal || QUEST_SLIME_REQUIRED_KILLS;
-    this.questText.setColor('#99ddff');
-    this.questText.setText(`Mision: matar slimes ${this.questProgress.kills}/${goal}`);
-  }
-
-  private handleNpcInteractInput() {
+  private handlePortalInput() {
     if (!this.room) return;
     if (!Phaser.Input.Keyboard.JustDown(this.interactKey)) return;
     if (this.chatOverlay.isInputFocused()) return;
@@ -1022,70 +881,15 @@ export class GameScene extends Phaser.Scene {
     const player = this.room.state.players.get(this.mySessionId) as PlayerData | undefined;
     if (!player) return;
 
-    // Check doors first
-    const nearbyDoorId = this.getNearbyDoorId(player);
-    if (nearbyDoorId) {
-      this.room.send(ClientMessage.ToggleDoor, {});
-      return;
-    }
-
-    const nearbyNpcId = this.getNearbyNpcId(player);
-    if (nearbyNpcId) {
-      // Allow interaction with priest while dead/ghost; block other NPCs
-      if (player.dead && nearbyNpcId !== PRIEST_NPC.id) {
-        this.addChatMessage('Sistema', 'No puedes interactuar ahora.', 'system');
-        return;
-      }
-      this.room.send(ClientMessage.NpcInteract, { npcId: nearbyNpcId });
-      return;
-    }
-
-    if (this.isNearPortal(player)) {
+    if (this.mapRenderer.isPortalTile(player.x, player.y)) {
       if (player.dead) {
         this.addChatMessage('Sistema', 'No puedes usar portales mientras estás muerto.', 'system');
         return;
       }
       this.room.send(ClientMessage.PortalUse, {});
-      return;
+    } else {
+      this.addChatMessage('Sistema', 'No hay portal cerca.', 'system');
     }
-
-    this.addChatMessage('Sistema', 'No hay NPC ni portal cerca.', 'system');
-  }
-
-  private getNearbyNpcId(player: PlayerData): string | null {
-    const candidates = [
-      { id: QUEST_NPC.id, x: QUEST_NPC.x, y: QUEST_NPC.y },
-      { id: MERCHANT_NPC.id, x: MERCHANT_NPC.x, y: MERCHANT_NPC.y },
-      { id: PRIEST_NPC.id, x: PRIEST_NPC.x, y: PRIEST_NPC.y },
-    ];
-
-    let nearestId: string | null = null;
-    let nearestDistance = Infinity;
-
-    for (const npc of candidates) {
-      const distance = Math.hypot(player.x - npc.x, player.y - npc.y);
-      if (distance <= NPC_INTERACT_RANGE && distance < nearestDistance) {
-        nearestDistance = distance;
-        nearestId = npc.id;
-      }
-    }
-
-    return nearestId;
-  }
-
-  private getNearbyDoorId(player: PlayerData): string | null {
-    for (const h of HOUSES) {
-      const dist = Math.hypot(player.x - h.doorX, player.y - h.doorY);
-      if (dist <= NPC_INTERACT_RANGE) return h.id;
-    }
-    return null;
-  }
-
-  private isNearPortal(player: PlayerData): boolean {
-    return (
-      Math.hypot(player.x - SAFE_PORTAL.x, player.y - SAFE_PORTAL.y) <= PORTAL_INTERACT_RANGE ||
-      Math.hypot(player.x - DUNGEON_PORTAL.x, player.y - DUNGEON_PORTAL.y) <= PORTAL_INTERACT_RANGE
-    );
   }
 
   // ==================== GAME LOOP ====================
@@ -1095,12 +899,13 @@ export class GameScene extends Phaser.Scene {
 
     this.handleMovementInput(delta);
     this.handleAttackInput();
-    this.handleNpcInteractInput();
+    this.handlePortalInput();
+    this.mapRenderer.updateCulling(this.cameras.main);
     this.interpolateSprites(delta);
     this.chatOverlay.tick();
   }
 
-  private handleMovementInput(delta: number) {
+  private handleMovementInput(_delta: number) {
     if (this.chatOverlay.isInputFocused()) return;
 
     const player = this.room?.state?.players?.get(this.mySessionId) as PlayerData | undefined;
@@ -1117,39 +922,47 @@ export class GameScene extends Phaser.Scene {
 
     if (dx === 0 && dy === 0) return;
 
-    const speed = PLAYER_SPEED * (delta / 1000);
-    const targetX = Math.max(0, Math.min(MAP_WIDTH - 1, player.x + dx * speed));
-    const targetY = Math.max(0, Math.min(MAP_HEIGHT - 1, player.y + dy * speed));
+    if (!this.mapRenderer.currentMapData) return; // mapa no listo aún
 
-    // Sliding collision: try full move, then X-only, then Y-only
-    let newX: number;
-    let newY: number;
+    const now = this.time.now;
+    if (now < this.nextMoveAt) return;
 
-    if (!isSolid(targetX, targetY)) {
-      newX = targetX;
-      newY = targetY;
-    } else if (dx !== 0 && !isSolid(targetX, player.y)) {
-      newX = targetX;
-      newY = player.y;
-    } else if (dy !== 0 && !isSolid(player.x, targetY)) {
-      newX = player.x;
-      newY = targetY;
-    } else {
-      return; // fully blocked
+    const stepIntervalMs = 1000 / PLAYER_SPEED;
+
+    const authTileX = Math.round(player.x);
+    const authTileY = Math.round(player.y);
+    if (!Number.isFinite(this.predictedTileX) || !Number.isFinite(this.predictedTileY)) {
+      this.predictedTileX = authTileX;
+      this.predictedTileY = authTileY;
     }
 
-    const threshold = 0.05;
-    if (Math.abs(newX - this.lastSentX) > threshold || Math.abs(newY - this.lastSentY) > threshold) {
-      this.room.send(ClientMessage.Move, { x: newX, y: newY, direction });
-      this.lastSentX = newX;
-      this.lastSentY = newY;
+    const mapW = AO_MAP_SIZE;
+    const mapH = AO_MAP_SIZE;
+    const targetX = Math.max(0, Math.min(mapW - 1, this.predictedTileX + dx));
+    const targetY = Math.max(0, Math.min(mapH - 1, this.predictedTileY + dy));
 
-      // Client-side prediction: move local container immediately so camera doesn't lag
-      const selfContainer = this.playerSprites.get(this.mySessionId);
-      if (selfContainer) {
-        selfContainer.setData('targetX', newX * TILE_SIZE + TILE_SIZE / 2);
-        selfContainer.setData('targetY', newY * TILE_SIZE + TILE_SIZE / 2);
-      }
+    const checkSolid = (x: number, y: number) => this.mapRenderer.isAoSolid(x, y);
+    if (checkSolid(targetX, targetY)) return;
+
+    if (targetX === this.lastSentX && targetY === this.lastSentY) return;
+
+    this.room.send(ClientMessage.Move, { x: targetX, y: targetY, direction });
+    this.lastSentX = targetX;
+    this.lastSentY = targetY;
+    this.predictedTileX = targetX;
+    this.predictedTileY = targetY;
+    this.nextMoveAt = now + stepIntervalMs;
+
+    // Auto-trigger portal when stepping onto a door tile (AO classic behaviour)
+    if (this.mapRenderer.isPortalTile(targetX, targetY)) {
+      this.room.send(ClientMessage.PortalUse, {});
+    }
+
+    // Client-side prediction: move local container immediately so camera doesn't lag
+    const selfContainer = this.playerSprites.get(this.mySessionId);
+    if (selfContainer) {
+      selfContainer.setData('targetX', targetX * TILE_SIZE + TILE_SIZE / 2);
+      selfContainer.setData('targetY', targetY * TILE_SIZE + TILE_SIZE / 2);
     }
   }
 
@@ -1190,20 +1003,56 @@ export class GameScene extends Phaser.Scene {
   }
 
   private interpolateSprites(delta: number) {
-    const lerpFactor = Math.min(1, delta / 50);
+    const playerStepPx = TILE_SIZE * PLAYER_SPEED * (delta / 1000);
+    const enemyStepPx  = TILE_SIZE * PLAYER_SPEED * (delta / 1000);
 
     this.playerSprites.forEach((container) => {
       const tx = container.getData('targetX') as number;
       const ty = container.getData('targetY') as number;
-      container.x += (tx - container.x) * lerpFactor;
-      container.y += (ty - container.y) * lerpFactor;
+      const prevX = container.x;
+      const prevY = container.y;
+      const dx = tx - container.x;
+      const dy = ty - container.y;
+      const distance = Math.hypot(dx, dy);
+
+      if (distance <= playerStepPx || distance < 0.001) {
+        container.x = tx;
+        container.y = ty;
+      } else {
+        const ratio = playerStepPx / distance;
+        container.x += dx * ratio;
+        container.y += dy * ratio;
+      }
+      // Y-sort: depth = pixel Y of the container centre (≈ character waist).
+      // Decoration sprites use depth = (tileY+1)*TILE_SIZE (foot of their tile),
+      // so a character whose centre is above a deco tile's foot renders behind it.
+      container.setDepth(container.y);
+
+      const isMoving = Math.abs(container.x - prevX) > 0.5 || Math.abs(container.y - prevY) > 0.5;
+      this.mapRenderer.tickCharacter(container, delta, isMoving);
     });
 
     this.enemySprites.forEach((container) => {
       const tx = container.getData('targetX') as number;
       const ty = container.getData('targetY') as number;
-      container.x += (tx - container.x) * lerpFactor;
-      container.y += (ty - container.y) * lerpFactor;
+      const prevX = container.x;
+      const prevY = container.y;
+      const dx = tx - container.x;
+      const dy = ty - container.y;
+      const dist = Math.hypot(dx, dy);
+
+      if (dist <= enemyStepPx || dist < 0.001) {
+        container.x = tx;
+        container.y = ty;
+      } else {
+        const ratio = enemyStepPx / dist;
+        container.x += dx * ratio;
+        container.y += dy * ratio;
+      }
+      container.setDepth(container.y);
+
+      const isMoving = Math.abs(container.x - prevX) > 0.5 || Math.abs(container.y - prevY) > 0.5;
+      this.mapRenderer.tickCharacter(container, delta, isMoving);
     });
 
     // Highlight selected enemy

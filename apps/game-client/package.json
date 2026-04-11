@@ -13,6 +13,8 @@
     "@ao/shared-constants": "workspace:*",
     "@ao/shared-protocol": "workspace:*",
     "@ao/shared-types": "workspace:*",
+    "@ao/shared-utils": "workspace:*",
+    "@ao/shared-world": "workspace:*",
     "@colyseus/sdk": "^0.17.35",
     "phaser": "^3.87.0"
   },

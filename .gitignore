@@ -9,3 +9,6 @@ Thumbs.db
 .turbo/
 coverage/
 .vite/
+
+# Generated world data (re-create with: pnpm tsx scripts/import-world.ts)
+packages/shared-world/data/

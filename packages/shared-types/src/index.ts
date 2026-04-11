@@ -30,6 +30,9 @@ export interface CreateCharacterRequest {
   name: string;
   race: Race;
   characterClass: CharacterClass;
+  idBody?: number;
+  idHead?: number;
+  idHelmet?: number;
 }
 
 export interface CharacterSummary {
@@ -38,6 +41,9 @@ export interface CharacterSummary {
   race: Race;
   characterClass: CharacterClass;
   level: number;
+  idBody: number;
+  idHead: number;
+  idHelmet: number;
 }
 
 export interface ApiError {
